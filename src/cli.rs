@@ -70,6 +70,22 @@ pub enum Commands {
     /// Reload config and validate it
     Reload,
 
+    /// Show status of current or specified workstream
+    Status {
+        /// Branch name (auto-detected from cwd if omitted)
+        branch: Option<String>,
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+
+    /// Create or view a GitHub PR for a workstream
+    Pr {
+        /// Branch name (auto-detected from cwd if omitted)
+        branch: Option<String>,
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for

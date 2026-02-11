@@ -8,6 +8,68 @@ use crate::repo::{self, RepoMetadata};
 use crate::tmux;
 use crate::{git, println_info, println_ok};
 
+fn detect_workstream(
+    repo_name: Option<&str>,
+    branch: Option<&str>,
+) -> Result<(RepoMetadata, String), VexError> {
+    // If both are specified, resolve directly
+    if let Some(branch) = branch {
+        let repo_meta = repo::resolve_repo(repo_name)?;
+        if !repo_meta.has_workstream(branch) {
+            return Err(VexError::WorkstreamNotFound {
+                repo: repo_meta.name.clone(),
+                branch: branch.into(),
+            });
+        }
+        return Ok((repo_meta, branch.to_string()));
+    }
+
+    // Try to detect from cwd
+    let cwd = std::env::current_dir()
+        .map_err(|e| VexError::ConfigError(format!("cannot get cwd: {e}")))?;
+    let cwd_str = cwd.to_string_lossy();
+
+    // Check if cwd is inside a vex worktree
+    let worktrees_base = crate::config::worktrees_dir()?;
+    if let Some(worktrees_str) = worktrees_base.to_str()
+        && let Some(suffix) = cwd_str.strip_prefix(worktrees_str)
+    {
+        // Path is ~/.vex/worktrees/<repo>/<branch>/...
+        let relative = suffix.trim_start_matches('/');
+        let parts: Vec<&str> = relative.splitn(3, '/').collect();
+        if parts.len() >= 2 {
+            let detected_repo = parts[0];
+            let detected_branch = parts[1];
+            if let Ok(repo_meta) = repo::resolve_repo(Some(detected_repo))
+                && repo_meta.has_workstream(detected_branch)
+            {
+                return Ok((repo_meta, detected_branch.to_string()));
+            }
+        }
+    }
+
+    // Fall back to git current branch
+    let current = git::current_branch(&cwd_str)
+        .map_err(|_| VexError::ConfigError("not in a vex workstream".into()))?;
+
+    // Search repos for a workstream with this branch
+    let repos = if let Some(name) = repo_name {
+        vec![repo::resolve_repo(Some(name))?]
+    } else {
+        repo::list_repos()?
+    };
+
+    for repo_meta in repos {
+        if repo_meta.has_workstream(&current) {
+            return Ok((repo_meta, current));
+        }
+    }
+
+    Err(VexError::ConfigError(format!(
+        "no workstream found for branch '{current}'"
+    )))
+}
+
 fn run_hooks(hooks: &[String], working_dir: &str) -> Result<(), VexError> {
     for hook in hooks {
         println_info!("  $ {hook}");
@@ -353,4 +415,93 @@ pub fn open() -> Result<(), VexError> {
         .ok_or_else(|| VexError::ConfigError("selection not found".into()))?;
 
     attach(Some(repo_name), branch)
+}
+
+pub fn status(repo_name: Option<&str>, branch: Option<&str>) -> Result<(), VexError> {
+    let (repo_meta, branch) = detect_workstream(repo_name, branch)?;
+
+    let worktree_path = repo_worktree_dir(&repo_meta.name)?.join(&branch);
+    let worktree_str = worktree_path.to_string_lossy().to_string();
+
+    println!("Repo:     {}", repo_meta.name);
+    println!("Branch:   {branch}");
+    println!(
+        "Worktree: {}",
+        if worktree_path.exists() {
+            &worktree_str
+        } else {
+            "(missing)"
+        }
+    );
+
+    // Tmux session status
+    let session = tmux::session_name(&repo_meta.name, &branch);
+    let active_sessions = tmux::list_sessions().unwrap_or_default();
+    let tmux_status = if active_sessions.contains(&session) {
+        "active"
+    } else {
+        "inactive"
+    };
+    println!("Tmux:     {tmux_status}");
+
+    // PR info
+    let ws = repo_meta.workstreams.iter().find(|w| w.branch == branch);
+    if let Some(ws) = ws {
+        if let Some(pr_num) = ws.pr_number {
+            match github::get_pr(&repo_meta.path, pr_num) {
+                Ok(pr) => println!("PR:       #{} — {} ({})", pr.number, pr.title, pr.url),
+                Err(_) => println!("PR:       #{pr_num} (could not fetch details)"),
+            }
+        } else {
+            println!("PR:       none");
+        }
+    }
+
+    // Git status summary
+    if worktree_path.exists() {
+        match git::status_short(&worktree_str) {
+            Ok(output) if output.is_empty() => println!("Status:   clean"),
+            Ok(output) => {
+                let count = output.lines().count();
+                println!("Status:   {count} changed file(s)");
+            }
+            Err(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+pub fn pr(repo_name: Option<&str>, branch: Option<&str>) -> Result<(), VexError> {
+    let (mut repo_meta, branch) = detect_workstream(repo_name, branch)?;
+
+    let worktree_path = repo_worktree_dir(&repo_meta.name)?.join(&branch);
+    let worktree_str = worktree_path.to_string_lossy().to_string();
+
+    let ws = repo_meta.workstreams.iter().find(|w| w.branch == branch);
+    let pr_number = ws.and_then(|w| w.pr_number);
+
+    if let Some(pr_num) = pr_number {
+        println_info!("Opening PR #{pr_num} in browser...");
+        github::pr_view_web(&repo_meta.path, pr_num)?;
+    } else {
+        println_info!("No PR found, opening PR creation page...");
+        // Push branch first so gh pr create works
+        github::pr_create_web(&worktree_str)?;
+
+        // Try to discover the newly created PR
+        if let Some(pr) = github::find_pr_for_branch(&repo_meta.path, &branch) {
+            println_ok!("Linked PR #{}: {}", pr.number, pr.title);
+            if let Some(ws) = repo_meta
+                .workstreams
+                .iter_mut()
+                .find(|w| w.branch == branch)
+            {
+                ws.pr_number = Some(pr.number);
+            }
+            repo_meta.save()?;
+        }
+    }
+
+    Ok(())
 }

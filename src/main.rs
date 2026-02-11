@@ -41,6 +41,8 @@ fn main() {
         Commands::Rm { branch, repo } => workstream::remove(repo.as_deref(), &branch),
         Commands::List { repo } => workstream::list(repo.as_deref()),
         Commands::Sync { repo } => workstream::sync(repo.as_deref()),
+        Commands::Status { branch, repo } => workstream::status(repo.as_deref(), branch.as_deref()),
+        Commands::Pr { branch, repo } => workstream::pr(repo.as_deref(), branch.as_deref()),
         Commands::Open => workstream::open(),
         Commands::Repos => cmd_repos(),
         Commands::Config => config::open_config_in_editor(),

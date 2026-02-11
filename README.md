@@ -94,6 +94,8 @@ hooks:
 | `vex rm <branch>` | Remove workstream |
 | `vex list [-r repo]` | List workstreams |
 | `vex repos` | List registered repositories |
+| `vex status [branch]` | Show status of current or specified workstream |
+| `vex pr [branch]` | Create or view a GitHub PR for a workstream |
 | `vex sync [-r repo]` | Sync PR metadata for workstreams |
 | `vex open` | Fuzzy-pick a workstream to attach to (requires fzf) |
 | `vex config` | Edit config |
