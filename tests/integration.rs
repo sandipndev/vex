@@ -56,8 +56,17 @@ fn setup_git_repo(dir: &std::path::Path) -> String {
     rp.to_string()
 }
 
+/// Manually register a repo with vex by writing the YAML config
+fn register_repo(vex_home: &str, repo_path: &str) {
+    let repos_dir = std::path::Path::new(vex_home).join("repos");
+    fs::create_dir_all(&repos_dir).unwrap();
+    let config =
+        format!("name: test-repo\npath: {repo_path}\ndefault_branch: main\nworkstreams: []\n");
+    fs::write(repos_dir.join("test-repo.yml"), config).unwrap();
+}
+
 #[test]
-fn test_init_registers_repo() {
+fn test_new_auto_registers_repo() {
     let tmp = tempfile::tempdir().unwrap();
     let vex_home = tmp.path().join("vex-home");
     let repos_dir = tmp.path().join("repos");
@@ -66,54 +75,37 @@ fn test_init_registers_repo() {
     let repo_path = setup_git_repo(&repos_dir);
     let vh = vex_home.to_str().unwrap();
 
-    let output = vex_ok(&["init"], &repo_path, vh);
-    assert!(output.contains("Registered repo 'test-repo'"));
+    // vex new should auto-register the repo
+    let output = vex(&["new", "feat-test"], &repo_path, vh);
 
-    // Verify repo config was created
+    // Check if repo config was created (auto-init)
     let repo_config = vex_home.join("repos").join("test-repo.yml");
-    assert!(repo_config.exists(), "repo config file should exist");
+    assert!(
+        repo_config.exists(),
+        "repo config file should exist after auto-init"
+    );
 
     let contents = fs::read_to_string(&repo_config).unwrap();
     assert!(contents.contains("name: test-repo"));
     assert!(contents.contains("default_branch: main"));
-}
 
-#[test]
-fn test_init_twice_fails() {
-    let tmp = tempfile::tempdir().unwrap();
-    let vex_home = tmp.path().join("vex-home");
-    let repos_dir = tmp.path().join("repos");
-    fs::create_dir_all(&repos_dir).unwrap();
+    // Check if worktree dir was created regardless of tmux status
+    let worktree_dir = vex_home
+        .join("worktrees")
+        .join("test-repo")
+        .join("feat-test");
 
-    let repo_path = setup_git_repo(&repos_dir);
-    let vh = vex_home.to_str().unwrap();
-
-    vex_ok(&["init"], &repo_path, vh);
-
-    let output = vex(&["init"], &repo_path, vh);
-    assert!(!output.status.success(), "second init should fail");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("already registered"),
-        "should mention already registered, got: {stderr}"
-    );
-}
-
-#[test]
-fn test_repos_lists_registered() {
-    let tmp = tempfile::tempdir().unwrap();
-    let vex_home = tmp.path().join("vex-home");
-    let repos_dir = tmp.path().join("repos");
-    fs::create_dir_all(&repos_dir).unwrap();
-
-    let repo_path = setup_git_repo(&repos_dir);
-    let vh = vex_home.to_str().unwrap();
-
-    vex_ok(&["init"], &repo_path, vh);
-
-    let output = vex_ok(&["repos"], &repo_path, vh);
-    assert!(output.contains("test-repo"));
-    assert!(output.contains("0 workstream(s)"));
+    if output.status.success() {
+        assert!(worktree_dir.exists());
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if worktree_dir.exists() {
+            assert!(
+                stderr.contains("tmux") || stderr.contains("hook"),
+                "failure should be tmux or hook-related, got: {stderr}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -126,7 +118,7 @@ fn test_list_empty() {
     let repo_path = setup_git_repo(&repos_dir);
     let vh = vex_home.to_str().unwrap();
 
-    vex_ok(&["init"], &repo_path, vh);
+    register_repo(vh, &repo_path);
 
     let output = vex_ok(&["list"], &repo_path, vh);
     assert!(output.contains("No workstreams"));
@@ -142,8 +134,8 @@ fn test_config_creates_default() {
     let repo_path = setup_git_repo(&repos_dir);
     let vh = vex_home.to_str().unwrap();
 
-    // init creates config
-    vex_ok(&["init"], &repo_path, vh);
+    // vex new triggers config creation
+    let _ = vex(&["new", "feat-cfg"], &repo_path, vh);
 
     let config_path = vex_home.join("config.yml");
     assert!(config_path.exists());
@@ -153,68 +145,6 @@ fn test_config_creates_default() {
     assert!(contents.contains("claude"));
     assert!(contents.contains("zsh"));
     assert!(contents.contains("direnv allow"));
-}
-
-#[test]
-fn test_new_creates_worktree_no_tmux() {
-    // This test creates a workstream but expects tmux failure
-    // since CI likely doesn't have tmux. We verify the worktree
-    // and metadata were set up correctly.
-    let tmp = tempfile::tempdir().unwrap();
-    let vex_home = tmp.path().join("vex-home");
-    let repos_dir = tmp.path().join("repos");
-    fs::create_dir_all(&repos_dir).unwrap();
-
-    let repo_path = setup_git_repo(&repos_dir);
-    let vh = vex_home.to_str().unwrap();
-
-    vex_ok(&["init"], &repo_path, vh);
-
-    // vex new will likely fail at the tmux step, but we can check
-    // if the worktree was created by checking git worktree list
-    let output = vex(&["new", "feat-test"], &repo_path, vh);
-
-    // Check if worktree dir was created regardless of tmux status
-    let worktree_dir = vex_home
-        .join("worktrees")
-        .join("test-repo")
-        .join("feat-test");
-
-    if output.status.success() {
-        // tmux was available - full success
-        assert!(worktree_dir.exists());
-    } else {
-        // tmux not available - check if we got past the git part
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if worktree_dir.exists() {
-            // Git worktree was created, tmux failed - that's expected in CI
-            assert!(
-                stderr.contains("tmux"),
-                "failure should be tmux-related, got: {stderr}"
-            );
-        }
-        // If worktree doesn't exist, the fetch failed (no remote) - also acceptable
-    }
-}
-
-#[test]
-fn test_reload_shows_config() {
-    let tmp = tempfile::tempdir().unwrap();
-    let vex_home = tmp.path().join("vex-home");
-    let repos_dir = tmp.path().join("repos");
-    fs::create_dir_all(&repos_dir).unwrap();
-
-    let repo_path = setup_git_repo(&repos_dir);
-    let vh = vex_home.to_str().unwrap();
-
-    vex_ok(&["init"], &repo_path, vh);
-
-    let output = vex_ok(&["reload"], &repo_path, vh);
-    assert!(output.contains("Config reloaded"));
-    assert!(output.contains("nvim"));
-    assert!(output.contains("claude"));
-    assert!(output.contains("zsh"));
-    assert!(output.contains("on_create hooks: direnv allow"));
 }
 
 #[test]

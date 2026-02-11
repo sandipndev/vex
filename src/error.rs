@@ -8,9 +8,6 @@ pub enum VexError {
     #[error("Repository '{0}' is not registered with vex. Run `vex init` first.")]
     RepoNotInitialized(String),
 
-    #[error("Repository '{0}' is already registered with vex")]
-    RepoAlreadyInitialized(String),
-
     #[error("Workstream '{branch}' already exists for repo '{repo}'")]
     WorkstreamAlreadyExists { repo: String, branch: String },
 
@@ -19,9 +16,6 @@ pub enum VexError {
 
     #[error("Git command failed: {0}")]
     GitError(String),
-
-    #[error("GitHub CLI error: {0}")]
-    GitHubError(String),
 
     #[error("tmux command failed: {0}")]
     TmuxError(String),

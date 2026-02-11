@@ -84,6 +84,20 @@ pub fn create_session(name: &str, working_dir: &str, config: &Config) -> Result<
     Ok(())
 }
 
+pub fn detach() -> Result<(), VexError> {
+    if std::env::var("TMUX").is_err() {
+        return Err(VexError::TmuxError("not inside a tmux session".into()));
+    }
+    let status = Command::new("tmux")
+        .args(["detach-client"])
+        .status()
+        .map_err(|e| VexError::TmuxError(format!("failed to detach: {e}")))?;
+    if !status.success() {
+        return Err(VexError::TmuxError("failed to detach from tmux".into()));
+    }
+    Ok(())
+}
+
 pub fn attach(name: &str) -> Result<(), VexError> {
     // If we're inside tmux, switch client; otherwise attach
     let inside_tmux = std::env::var("TMUX").is_ok();

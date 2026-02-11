@@ -9,14 +9,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Register the current git repository with vex
-    Init,
-
     /// Create a new workstream (branch + worktree + tmux session)
     ///
-    /// Use "#123" as the branch to open a GitHub PR by number.
+    /// Auto-registers the repo with vex if not already registered.
     New {
-        /// Branch name or "#<pr-number>" to reference a GitHub PR
+        /// Branch name
         branch: String,
 
         /// Repository name (defaults to current repo)
@@ -24,8 +21,9 @@ pub enum Commands {
         repo: Option<String>,
     },
 
-    /// Attach to an existing workstream's tmux session
-    Attach {
+    /// Switch to an existing workstream's tmux session
+    #[command(alias = "attach")]
+    Switch {
         /// Branch name of the workstream
         branch: String,
 
@@ -44,42 +42,27 @@ pub enum Commands {
         repo: Option<String>,
     },
 
-    /// List workstreams
+    /// List workstreams and repos
     List {
         /// Repository name (defaults to all repos)
         #[arg(short, long)]
         repo: Option<String>,
     },
 
-    /// List registered repositories
-    Repos,
+    /// Detach from the current tmux session
+    Exit,
 
-    /// Open vex config in $EDITOR
-    Config,
-
-    /// Sync PR metadata for workstreams
-    Sync {
-        /// Repository name (defaults to all repos)
-        #[arg(short, long)]
-        repo: Option<String>,
-    },
-
-    /// Fuzzy-pick a workstream to attach to
-    Open,
-
-    /// Reload config and validate it
-    Reload,
-
-    /// Show status of current or specified workstream
-    Status {
+    /// Print the main repo path for the current workstream (use with `cd $(vex rth)`)
+    #[command(alias = "return-to-home")]
+    Rth {
         /// Branch name (auto-detected from cwd if omitted)
         branch: Option<String>,
         #[arg(short, long)]
         repo: Option<String>,
     },
 
-    /// Create or view a GitHub PR for a workstream
-    Pr {
+    /// Show status of current or specified workstream
+    Status {
         /// Branch name (auto-detected from cwd if omitted)
         branch: Option<String>,
         #[arg(short, long)]
