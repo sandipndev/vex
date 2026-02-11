@@ -22,6 +22,9 @@ pub struct Window {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Hooks {
     #[serde(default)]
+    pub on_create: Vec<String>,
+    /// Legacy field — migrated to on_create automatically
+    #[serde(default, skip_serializing)]
     pub on_enter: Vec<String>,
 }
 
@@ -43,7 +46,8 @@ impl Default for Config {
                 },
             ],
             hooks: Hooks {
-                on_enter: vec!["direnv allow".into()],
+                on_create: vec!["direnv allow".into()],
+                on_enter: vec![],
             },
         }
     }
@@ -54,7 +58,12 @@ impl Config {
         let path = Self::path()?;
         if path.exists() {
             let contents = fs::read_to_string(&path).map_err(|e| VexError::io(&path, e))?;
-            let config: Config = serde_yaml::from_str(&contents)?;
+            let mut config: Config = serde_yaml::from_str(&contents)?;
+            // Migrate legacy on_enter → on_create
+            if !config.hooks.on_enter.is_empty() && config.hooks.on_create.is_empty() {
+                config.hooks.on_create = std::mem::take(&mut config.hooks.on_enter);
+                config.save()?;
+            }
             Ok(config)
         } else {
             let config = Config::default();
@@ -145,7 +154,7 @@ mod tests {
     #[test]
     fn default_config_has_direnv_hook() {
         let config = Config::default();
-        assert_eq!(config.hooks.on_enter, vec!["direnv allow"]);
+        assert_eq!(config.hooks.on_create, vec!["direnv allow"]);
     }
 
     #[test]
@@ -154,7 +163,7 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).unwrap();
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.windows.len(), config.windows.len());
-        assert_eq!(parsed.hooks.on_enter, config.hooks.on_enter);
+        assert_eq!(parsed.hooks.on_create, config.hooks.on_create);
         for (a, b) in parsed.windows.iter().zip(config.windows.iter()) {
             assert_eq!(a.name, b.name);
             assert_eq!(a.command, b.command);
@@ -173,7 +182,7 @@ mod tests {
         let contents = fs::read_to_string(&config_path).unwrap();
         let loaded: Config = serde_yaml::from_str(&contents).unwrap();
         assert_eq!(loaded.windows.len(), 3);
-        assert_eq!(loaded.hooks.on_enter, vec!["direnv allow"]);
+        assert_eq!(loaded.hooks.on_create, vec!["direnv allow"]);
     }
 
     #[test]

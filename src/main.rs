@@ -40,6 +40,8 @@ fn main() {
         Commands::Attach { branch, repo } => workstream::attach(repo.as_deref(), &branch),
         Commands::Rm { branch, repo } => workstream::remove(repo.as_deref(), &branch),
         Commands::List { repo } => workstream::list(repo.as_deref()),
+        Commands::Sync { repo } => workstream::sync(repo.as_deref()),
+        Commands::Open => workstream::open(),
         Commands::Repos => cmd_repos(),
         Commands::Config => config::open_config_in_editor(),
         Commands::Reload => cmd_reload(),
@@ -74,8 +76,8 @@ fn cmd_reload() -> Result<(), error::VexError> {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    if !config.hooks.on_enter.is_empty() {
-        println_info!("on_enter hooks: {}", config.hooks.on_enter.join(", "));
+    if !config.hooks.on_create.is_empty() {
+        println_info!("on_create hooks: {}", config.hooks.on_create.join(", "));
     }
     Ok(())
 }

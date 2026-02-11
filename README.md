@@ -53,7 +53,7 @@ Each workstream is a **git worktree** + **tmux session**:
 - Worktrees live at `~/.vex/worktrees/<repo>/<branch>/`
 - tmux sessions are named `vex/<repo>/<branch>`
 - Default windows: `nvim`, `claude`, `zsh`
-- Hooks run on enter (default: `direnv allow`)
+- `on_create` hooks run once when a workstream is created (default: `direnv allow`)
 
 When you run `vex new <branch>`:
 1. Fetches from origin
@@ -79,7 +79,7 @@ windows:
   - name: zsh
     command: ''
 hooks:
-  on_enter:
+  on_create:
     - direnv allow
 ```
 
@@ -94,6 +94,8 @@ hooks:
 | `vex rm <branch>` | Remove workstream |
 | `vex list [-r repo]` | List workstreams |
 | `vex repos` | List registered repositories |
+| `vex sync [-r repo]` | Sync PR metadata for workstreams |
+| `vex open` | Fuzzy-pick a workstream to attach to (requires fzf) |
 | `vex config` | Edit config |
 | `vex reload` | Reload and validate config |
 
