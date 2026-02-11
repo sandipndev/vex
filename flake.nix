@@ -20,7 +20,12 @@
     rust-overlay,
     crane,
   }:
-    flake-utils.lib.eachDefaultSystem
+    {
+      overlays.default = final: prev: {
+        vex = self.packages.${final.system}.vex;
+      };
+    }
+    // flake-utils.lib.eachDefaultSystem
     (system: let
       overlays = [(import rust-overlay)];
       pkgs = import nixpkgs {

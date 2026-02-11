@@ -1,7 +1,18 @@
 [package]
-name = "vex"
+name = "vex-cli"
 version = "0.1.0"
 edition = "2024"
+description = "Parallel workstream manager using git worktrees and tmux"
+license = "MIT"
+repository = "https://github.com/sandipndev/vex"
+homepage = "https://github.com/sandipndev/vex"
+keywords = ["tmux", "git", "worktree", "workflow", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+
+[[bin]]
+name = "vex"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
