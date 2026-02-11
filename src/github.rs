@@ -41,9 +41,8 @@ pub fn get_pr(repo_root: &str, pr_number: u64) -> Result<PullRequest, VexError> 
         )));
     }
 
-    let info: PrInfo = serde_json::from_slice(&output.stdout).map_err(|e| {
-        VexError::GitHubError(format!("failed to parse gh output: {e}"))
-    })?;
+    let info: PrInfo = serde_json::from_slice(&output.stdout)
+        .map_err(|e| VexError::GitHubError(format!("failed to parse gh output: {e}")))?;
 
     Ok(PullRequest {
         number: info.number,

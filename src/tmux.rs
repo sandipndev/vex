@@ -17,19 +17,15 @@ fn run_tmux(args: &[&str]) -> Result<String, VexError> {
 }
 
 pub fn session_name(repo: &str, branch: &str) -> String {
-    format!("vex_{repo}_{branch}")
-        .replace(['.', '/', ':'], "-")
+    let sanitize = |s: &str| s.replace(['.', ':'], "-");
+    format!("vex/{}/{}", sanitize(repo), sanitize(branch))
 }
 
 pub fn session_exists(name: &str) -> bool {
     run_tmux(&["has-session", "-t", name]).is_ok()
 }
 
-pub fn create_session(
-    name: &str,
-    working_dir: &str,
-    config: &Config,
-) -> Result<(), VexError> {
+pub fn create_session(name: &str, working_dir: &str, config: &Config) -> Result<(), VexError> {
     let hooks = &config.hooks.on_enter;
     let hook_cmds = if hooks.is_empty() {
         String::new()
@@ -38,9 +34,10 @@ pub fn create_session(
     };
 
     // Create session with first window
-    let first_window = config.windows.first().ok_or_else(|| {
-        VexError::ConfigError("No windows configured".into())
-    })?;
+    let first_window = config
+        .windows
+        .first()
+        .ok_or_else(|| VexError::ConfigError("No windows configured".into()))?;
 
     let first_cmd = if first_window.command.is_empty() {
         hook_cmds.clone()
@@ -152,9 +149,36 @@ pub fn list_sessions() -> Result<Vec<String>, VexError> {
     match run_tmux(&["list-sessions", "-F", "#{session_name}"]) {
         Ok(output) => Ok(output
             .lines()
-            .filter(|l| l.starts_with("vex_"))
+            .filter(|l| l.starts_with("vex/"))
             .map(|l| l.to_string())
             .collect()),
         Err(_) => Ok(vec![]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_name_basic() {
+        assert_eq!(session_name("myrepo", "feature-x"), "vex/myrepo/feature-x");
+    }
+
+    #[test]
+    fn session_name_replaces_dots_and_colons() {
+        assert_eq!(
+            session_name("my.repo", "feat/login"),
+            "vex/my-repo/feat/login"
+        );
+        assert_eq!(session_name("repo", "fix:thing"), "vex/repo/fix-thing");
+    }
+
+    #[test]
+    fn session_name_preserves_slashes() {
+        assert_eq!(
+            session_name("org.repo", "user/feat.v2"),
+            "vex/org-repo/user/feat-v2"
+        );
     }
 }

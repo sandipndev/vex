@@ -1,6 +1,6 @@
 use std::fs;
 
-use crate::config::{repo_worktree_dir, Config};
+use crate::config::{Config, repo_worktree_dir};
 use crate::error::VexError;
 use crate::github;
 use crate::repo::{self, RepoMetadata};
@@ -45,8 +45,7 @@ pub fn create(repo_name: Option<&str>, branch_spec: &str) -> Result<(), VexError
 
     // Set up worktree directory
     let worktree_base = repo_worktree_dir(&repo_meta.name)?;
-    fs::create_dir_all(&worktree_base)
-        .map_err(|e| VexError::io(&worktree_base, e))?;
+    fs::create_dir_all(&worktree_base).map_err(|e| VexError::io(&worktree_base, e))?;
     let worktree_path = worktree_base.join(&branch);
     let worktree_str = worktree_path.to_string_lossy().to_string();
 
@@ -177,7 +176,13 @@ pub fn list(repo_name: Option<&str>) -> Result<(), VexError> {
                     .pr_number
                     .map(|n| format!(" (PR #{n})"))
                     .unwrap_or_default();
-                println!("  {} {}{}{}", ws.branch, ws.created_at.format("%Y-%m-%d"), pr, active);
+                println!(
+                    "  {} {}{}{}",
+                    ws.branch,
+                    ws.created_at.format("%Y-%m-%d"),
+                    pr,
+                    active
+                );
             }
         }
     }

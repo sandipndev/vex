@@ -125,3 +125,36 @@ pub fn delete_branch(repo_root: &str, branch: &str) -> Result<(), VexError> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_name_from_path() {
+        assert_eq!(repo_name("/home/user/projects/myrepo").unwrap(), "myrepo");
+        assert_eq!(repo_name("/tmp/test-repo").unwrap(), "test-repo");
+    }
+
+    #[test]
+    fn repo_name_root_fails() {
+        assert!(repo_name("/").is_err());
+    }
+
+    #[test]
+    fn default_branch_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        // Create a git repo with a "main" branch
+        run_git(&["init", "-b", "main"], Some(repo_path)).unwrap();
+        run_git(&["config", "user.email", "test@test.com"], Some(repo_path)).unwrap();
+        run_git(&["config", "user.name", "Test"], Some(repo_path)).unwrap();
+        run_git(&["config", "commit.gpgsign", "false"], Some(repo_path)).unwrap();
+        std::fs::write(tmp.path().join("README"), "hello").unwrap();
+        run_git(&["add", "."], Some(repo_path)).unwrap();
+        run_git(&["commit", "-m", "init"], Some(repo_path)).unwrap();
+
+        let branch = default_branch(repo_path).unwrap();
+        assert_eq!(branch, "main");
+    }
+}

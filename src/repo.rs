@@ -59,7 +59,6 @@ impl RepoMetadata {
     pub fn has_workstream(&self, branch: &str) -> bool {
         self.workstreams.iter().any(|w| w.branch == branch)
     }
-
 }
 
 pub fn init_repo() -> Result<RepoMetadata, VexError> {
@@ -114,4 +113,84 @@ pub fn list_repos() -> Result<Vec<RepoMetadata>, VexError> {
     }
     repos.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(repos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_meta() -> RepoMetadata {
+        RepoMetadata {
+            name: "test-repo".into(),
+            path: "/tmp/test-repo".into(),
+            default_branch: "main".into(),
+            workstreams: vec![],
+        }
+    }
+
+    #[test]
+    fn add_and_has_workstream() {
+        let mut meta = make_meta();
+        assert!(!meta.has_workstream("feat-a"));
+        meta.add_workstream("feat-a", None);
+        assert!(meta.has_workstream("feat-a"));
+    }
+
+    #[test]
+    fn add_workstream_with_pr() {
+        let mut meta = make_meta();
+        meta.add_workstream("feat-b", Some(42));
+        assert_eq!(meta.workstreams[0].pr_number, Some(42));
+    }
+
+    #[test]
+    fn add_workstream_idempotent() {
+        let mut meta = make_meta();
+        meta.add_workstream("feat-a", None);
+        meta.add_workstream("feat-a", None);
+        assert_eq!(meta.workstreams.len(), 1);
+    }
+
+    #[test]
+    fn remove_workstream() {
+        let mut meta = make_meta();
+        meta.add_workstream("feat-a", None);
+        meta.add_workstream("feat-b", None);
+        meta.remove_workstream("feat-a");
+        assert!(!meta.has_workstream("feat-a"));
+        assert!(meta.has_workstream("feat-b"));
+    }
+
+    #[test]
+    fn metadata_serde_roundtrip() {
+        let mut meta = make_meta();
+        meta.add_workstream("feat-x", Some(99));
+        let yaml = serde_yaml::to_string(&meta).unwrap();
+        let parsed: RepoMetadata = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.name, "test-repo");
+        assert_eq!(parsed.workstreams.len(), 1);
+        assert_eq!(parsed.workstreams[0].branch, "feat-x");
+        assert_eq!(parsed.workstreams[0].pr_number, Some(99));
+    }
+
+    #[test]
+    fn metadata_file_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repos_dir = tmp.path().join("repos");
+        std::fs::create_dir_all(&repos_dir).unwrap();
+
+        let mut meta = make_meta();
+        meta.add_workstream("feat-a", None);
+
+        // Write directly to file
+        let path = repos_dir.join("test-repo.yml");
+        let yaml = serde_yaml::to_string(&meta).unwrap();
+        std::fs::write(&path, &yaml).unwrap();
+
+        // Read back
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let loaded: RepoMetadata = serde_yaml::from_str(&contents).unwrap();
+        assert_eq!(loaded.name, "test-repo");
+        assert!(loaded.has_workstream("feat-a"));
+    }
 }
