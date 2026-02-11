@@ -38,6 +38,10 @@ fn main() {
         Commands::Switch { branch, repo } => workstream::switch(repo.as_deref(), &branch),
         Commands::Rm { branch, repo } => workstream::remove(repo.as_deref(), &branch),
         Commands::List { repo } => workstream::list(repo.as_deref()),
+        Commands::Open => {
+            println_info!("TUI available shortly.");
+            Ok(())
+        }
         Commands::Exit => workstream::exit(),
         Commands::Rth { branch, repo } => workstream::rth(repo.as_deref(), branch.as_deref()),
         Commands::Status { branch, repo } => workstream::status(repo.as_deref(), branch.as_deref()),

@@ -49,6 +49,9 @@ pub enum Commands {
         repo: Option<String>,
     },
 
+    /// Open the TUI dashboard
+    Open,
+
     /// Detach from the current tmux session
     Exit,
 
