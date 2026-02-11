@@ -5,11 +5,22 @@ Parallel workstream manager. Create isolated workstreams (git worktree + tmux se
 ## Install
 
 ```bash
-# From source (requires Rust toolchain)
+# From crates.io
+cargo install vex-cli
+
+# With Nix (run directly)
+nix run github:sandipndev/vex
+
+# With Nix (in a flake)
+# inputs.vex.url = "github:sandipndev/vex";
+# then add: vex.packages.${system}.default
+# or use the overlay: overlays = [vex.overlays.default]; -> pkgs.vex
+
+# From source
 cargo install --path .
 
-# With Nix
-nix build
+# From GitHub releases
+# Download binary from https://github.com/sandipndev/vex/releases
 ```
 
 ## Quick Start
