@@ -196,3 +196,42 @@ fn test_new_creates_worktree_no_tmux() {
         // If worktree doesn't exist, the fetch failed (no remote) - also acceptable
     }
 }
+
+#[test]
+fn test_reload_shows_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vex_home = tmp.path().join("vex-home");
+    let repos_dir = tmp.path().join("repos");
+    fs::create_dir_all(&repos_dir).unwrap();
+
+    let repo_path = setup_git_repo(&repos_dir);
+    let vh = vex_home.to_str().unwrap();
+
+    vex_ok(&["init"], &repo_path, vh);
+
+    let output = vex_ok(&["reload"], &repo_path, vh);
+    assert!(output.contains("Config reloaded"));
+    assert!(output.contains("nvim"));
+    assert!(output.contains("claude"));
+    assert!(output.contains("zsh"));
+    assert!(output.contains("direnv allow"));
+}
+
+#[test]
+fn test_completions_zsh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vh = tmp.path().to_str().unwrap();
+
+    let output = vex_ok(&["completions", "zsh"], "/tmp", vh);
+    assert!(output.contains("compdef"));
+    assert!(output.contains("vex"));
+}
+
+#[test]
+fn test_completions_bash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vh = tmp.path().to_str().unwrap();
+
+    let output = vex_ok(&["completions", "bash"], "/tmp", vh);
+    assert!(output.contains("vex"));
+}

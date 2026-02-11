@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "vex", about = "Parallel workstream manager", version)]
@@ -56,4 +56,20 @@ pub enum Commands {
 
     /// Open vex config in $EDITOR
     Config,
+
+    /// Reload config and validate it
+    Reload,
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: ShellChoice,
+    },
+}
+
+#[derive(Clone, ValueEnum)]
+pub enum ShellChoice {
+    Bash,
+    Zsh,
+    Fish,
 }

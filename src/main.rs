@@ -7,7 +7,7 @@ mod repo;
 mod tmux;
 mod workstream;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands};
 
 #[macro_export]
@@ -42,6 +42,8 @@ fn main() {
         Commands::List { repo } => workstream::list(repo.as_deref()),
         Commands::Repos => cmd_repos(),
         Commands::Config => config::open_config_in_editor(),
+        Commands::Reload => cmd_reload(),
+        Commands::Completions { shell } => cmd_completions(shell),
     };
 
     if let Err(e) = result {
@@ -56,6 +58,37 @@ fn cmd_init() -> Result<(), error::VexError> {
     let meta = repo::init_repo()?;
     println_ok!("Registered repo '{}' at {}", meta.name, meta.path);
     println_ok!("Default branch: {}", meta.default_branch);
+    Ok(())
+}
+
+fn cmd_reload() -> Result<(), error::VexError> {
+    let config = config::Config::load_or_create()?;
+    println_ok!("Config reloaded successfully");
+    println_info!(
+        "{} window(s): {}",
+        config.windows.len(),
+        config
+            .windows
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if !config.hooks.on_enter.is_empty() {
+        println_info!("on_enter hooks: {}", config.hooks.on_enter.join(", "));
+    }
+    Ok(())
+}
+
+fn cmd_completions(shell: cli::ShellChoice) -> Result<(), error::VexError> {
+    use clap_complete::{Shell, generate};
+    let shell = match shell {
+        cli::ShellChoice::Bash => Shell::Bash,
+        cli::ShellChoice::Zsh => Shell::Zsh,
+        cli::ShellChoice::Fish => Shell::Fish,
+    };
+    let mut cmd = Cli::command();
+    generate(shell, &mut cmd, "vex", &mut std::io::stdout());
     Ok(())
 }
 
