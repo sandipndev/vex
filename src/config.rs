@@ -103,33 +103,6 @@ pub fn worktrees_dir() -> Result<PathBuf, VexError> {
     Ok(vex_home()?.join("worktrees"))
 }
 
-pub fn ensure_vex_dirs() -> Result<(), VexError> {
-    for dir in [vex_home()?, repos_dir()?, worktrees_dir()?] {
-        fs::create_dir_all(&dir).map_err(|e| VexError::io(&dir, e))?;
-    }
-    Ok(())
-}
-
-pub fn open_config_in_editor() -> Result<(), VexError> {
-    let path = Config::path()?;
-    if !path.exists() {
-        Config::default().save()?;
-    }
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".into());
-    let status = std::process::Command::new(&editor)
-        .arg(&path)
-        .status()
-        .map_err(|e| VexError::io(&path, e))?;
-    if !status.success() {
-        return Err(VexError::ConfigError(format!(
-            "Editor '{}' exited with status {}",
-            editor,
-            status.code().unwrap_or(-1)
-        )));
-    }
-    Ok(())
-}
-
 pub fn repo_config_path(repo_name: &str) -> Result<PathBuf, VexError> {
     Ok(repos_dir()?.join(format!("{repo_name}.yml")))
 }

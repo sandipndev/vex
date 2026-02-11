@@ -3,7 +3,7 @@ use std::fs;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ensure_vex_dirs, repo_config_path};
+use crate::config::repo_config_path;
 use crate::error::VexError;
 use crate::git;
 
@@ -62,14 +62,17 @@ impl RepoMetadata {
 }
 
 pub fn init_repo() -> Result<RepoMetadata, VexError> {
-    ensure_vex_dirs()?;
+    // Ensure dirs exist for first-time use
+    let repos_dir = crate::config::repos_dir()?;
+    fs::create_dir_all(&repos_dir).map_err(|e| VexError::io(&repos_dir, e))?;
 
     let repo_root = git::repo_root()?;
     let repo_name = git::repo_name(&repo_root)?;
 
     let config_path = repo_config_path(&repo_name)?;
     if config_path.exists() {
-        return Err(VexError::RepoAlreadyInitialized(repo_name));
+        // Already registered, just load it
+        return RepoMetadata::load(&repo_name);
     }
 
     let default_branch = git::default_branch(&repo_root)?;
@@ -90,9 +93,33 @@ pub fn resolve_repo(repo_name: Option<&str>) -> Result<RepoMetadata, VexError> {
         None => {
             let repo_root = git::repo_root()?;
             let name = git::repo_name(&repo_root)?;
-            RepoMetadata::load(&name)
+            // If the detected name is registered, use it
+            if let Ok(meta) = RepoMetadata::load(&name) {
+                return Ok(meta);
+            }
+            // Otherwise check if cwd is inside a vex worktree
+            resolve_repo_from_worktree_path()
         }
     }
+}
+
+/// When inside ~/.vex/worktrees/<repo>/<branch>/, extract repo name from the path.
+fn resolve_repo_from_worktree_path() -> Result<RepoMetadata, VexError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| VexError::ConfigError(format!("cannot get cwd: {e}")))?;
+    let cwd_str = cwd.to_string_lossy();
+    let worktrees_base = crate::config::worktrees_dir()?;
+    if let Some(worktrees_str) = worktrees_base.to_str()
+        && let Some(suffix) = cwd_str.strip_prefix(worktrees_str)
+    {
+        let relative = suffix.trim_start_matches('/');
+        if let Some(repo_name) = relative.split('/').next()
+            && !repo_name.is_empty()
+        {
+            return RepoMetadata::load(repo_name);
+        }
+    }
+    Err(VexError::NotAGitRepo)
 }
 
 pub fn list_repos() -> Result<Vec<RepoMetadata>, VexError> {

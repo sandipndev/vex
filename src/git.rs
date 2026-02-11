@@ -59,45 +59,6 @@ pub fn default_branch(repo_root: &str) -> Result<String, VexError> {
     run_git(&["branch", "--show-current"], Some(repo_root))
 }
 
-pub fn fetch(repo_root: &str) -> Result<(), VexError> {
-    run_git(&["fetch", "origin"], Some(repo_root))?;
-    Ok(())
-}
-
-pub fn remote_branch_exists(repo_root: &str, branch: &str) -> Result<bool, VexError> {
-    let result = run_git(
-        &[
-            "ls-remote",
-            "--heads",
-            "origin",
-            &format!("refs/heads/{branch}"),
-        ],
-        Some(repo_root),
-    )?;
-    Ok(!result.is_empty())
-}
-
-pub fn worktree_add_existing(
-    repo_root: &str,
-    worktree_path: &str,
-    branch: &str,
-) -> Result<(), VexError> {
-    // Create worktree tracking the remote branch
-    run_git(
-        &[
-            "worktree",
-            "add",
-            "--track",
-            "-b",
-            branch,
-            worktree_path,
-            &format!("origin/{branch}"),
-        ],
-        Some(repo_root),
-    )?;
-    Ok(())
-}
-
 pub fn worktree_add_new(
     repo_root: &str,
     worktree_path: &str,

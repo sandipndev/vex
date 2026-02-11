@@ -628,7 +628,6 @@ dependencies = [
  "clap_complete",
  "dirs",
  "serde",
- "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror",
