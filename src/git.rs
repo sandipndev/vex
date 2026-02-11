@@ -119,6 +119,14 @@ pub fn worktree_remove(repo_root: &str, worktree_path: &str) -> Result<(), VexEr
     Ok(())
 }
 
+pub fn current_branch(cwd: &str) -> Result<String, VexError> {
+    run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(cwd))
+}
+
+pub fn status_short(cwd: &str) -> Result<String, VexError> {
+    run_git(&["status", "--short"], Some(cwd))
+}
+
 pub fn delete_branch(repo_root: &str, branch: &str) -> Result<(), VexError> {
     // Best-effort: don't fail if branch can't be deleted
     let _ = run_git(&["branch", "-D", branch], Some(repo_root));

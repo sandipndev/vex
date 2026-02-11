@@ -52,6 +52,32 @@ pub fn get_pr(repo_root: &str, pr_number: u64) -> Result<PullRequest, VexError> 
     })
 }
 
+pub fn pr_view_web(repo_root: &str, pr_number: u64) -> Result<(), VexError> {
+    let status = Command::new("gh")
+        .args(["pr", "view", &pr_number.to_string(), "--web"])
+        .current_dir(repo_root)
+        .status()
+        .map_err(|e| VexError::GitHubError(format!("failed to run gh: {e}")))?;
+    if !status.success() {
+        return Err(VexError::GitHubError(format!(
+            "gh pr view #{pr_number} --web failed"
+        )));
+    }
+    Ok(())
+}
+
+pub fn pr_create_web(worktree_path: &str) -> Result<(), VexError> {
+    let status = Command::new("gh")
+        .args(["pr", "create", "--web"])
+        .current_dir(worktree_path)
+        .status()
+        .map_err(|e| VexError::GitHubError(format!("failed to run gh: {e}")))?;
+    if !status.success() {
+        return Err(VexError::GitHubError("gh pr create --web failed".into()));
+    }
+    Ok(())
+}
+
 /// Given a branch name and repo root, check if there's a PR for it and return the number
 pub fn find_pr_for_branch(repo_root: &str, branch: &str) -> Option<PullRequest> {
     let output = Command::new("gh")
