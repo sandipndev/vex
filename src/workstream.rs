@@ -146,12 +146,32 @@ pub fn create(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
     Ok(())
 }
 
-pub fn switch(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
-    // If no repo given, try detect from cwd (handles being inside a worktree)
+pub fn switch(repo_name: Option<&str>, branch: Option<&str>) -> Result<(), VexError> {
+    let (repo_name_resolved, branch) = match branch {
+        Some(b) => pick_workstream_by_name(repo_name, b)?,
+        None => pick_workstream_fzf(repo_name)?,
+    };
+
+    let session = tmux::session_name(&repo_name_resolved, &branch);
+    if !tmux::session_exists(&session) {
+        let config = Config::load_or_create()?;
+        let worktree_path = repo_worktree_dir(&repo_name_resolved)?.join(&branch);
+        let worktree_str = worktree_path.to_string_lossy().to_string();
+        println_info!("Recreating tmux session '{session}'...");
+        tmux::create_session(&session, &worktree_str, &config)?;
+    }
+
+    tmux::attach(&session)?;
+    Ok(())
+}
+
+fn pick_workstream_by_name(
+    repo_name: Option<&str>,
+    branch: &str,
+) -> Result<(String, String), VexError> {
     let repo_meta = match repo::resolve_repo(repo_name) {
         Ok(meta) => meta,
         Err(_) if repo_name.is_none() => {
-            // Try all repos to find one with this branch
             let repos = repo::list_repos()?;
             repos
                 .into_iter()
@@ -171,18 +191,87 @@ pub fn switch(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
         });
     }
 
-    let session = tmux::session_name(&repo_meta.name, branch);
-    if !tmux::session_exists(&session) {
-        // Session was killed externally, recreate it
-        let config = Config::load_or_create()?;
-        let worktree_path = repo_worktree_dir(&repo_meta.name)?.join(branch);
-        let worktree_str = worktree_path.to_string_lossy().to_string();
-        println_info!("Recreating tmux session '{session}'...");
-        tmux::create_session(&session, &worktree_str, &config)?;
+    Ok((repo_meta.name, branch.to_string()))
+}
+
+fn pick_workstream_fzf(repo_name: Option<&str>) -> Result<(String, String), VexError> {
+    let repos = if let Some(name) = repo_name {
+        vec![repo::resolve_repo(Some(name))?]
+    } else {
+        let all = repo::list_repos()?;
+        if all.is_empty() {
+            return Err(VexError::ConfigError(
+                "No repos registered. Run `vex new <branch>` first.".into(),
+            ));
+        }
+        all
+    };
+
+    let active_sessions = tmux::list_sessions().unwrap_or_default();
+
+    let mut entries: Vec<(String, String, String)> = Vec::new();
+    for repo_meta in &repos {
+        for ws in &repo_meta.workstreams {
+            let session = tmux::session_name(&repo_meta.name, &ws.branch);
+            let active = if active_sessions.contains(&session) {
+                " [active]"
+            } else {
+                ""
+            };
+            let display = format!("{}/{}{}", repo_meta.name, ws.branch, active);
+            entries.push((display, repo_meta.name.clone(), ws.branch.clone()));
+        }
     }
 
-    tmux::attach(&session)?;
-    Ok(())
+    if entries.is_empty() {
+        return Err(VexError::ConfigError("No workstreams found.".into()));
+    }
+
+    let input = entries
+        .iter()
+        .map(|(d, _, _)| d.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let fzf = Command::new("fzf")
+        .args(["--prompt", "switch> ", "--height", "~40%", "--reverse"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+
+    let mut child = match fzf {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(VexError::ConfigError(
+                "fzf not found. Install fzf or pass a branch name.".into(),
+            ));
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(input.as_bytes());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| VexError::ConfigError(format!("fzf failed: {e}")))?;
+
+    if !output.status.success() {
+        return Err(VexError::ConfigError("cancelled".into()));
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        return Err(VexError::ConfigError("cancelled".into()));
+    }
+
+    let (_display, repo, branch) = entries
+        .iter()
+        .find(|(d, _, _)| d == &selected)
+        .ok_or_else(|| VexError::ConfigError("selection not found".into()))?;
+
+    Ok((repo.clone(), branch.clone()))
 }
 
 pub fn remove(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {

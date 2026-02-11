@@ -35,7 +35,7 @@ fn main() {
 
     let result = match cli.command {
         Commands::New { branch, repo } => workstream::create(repo.as_deref(), &branch),
-        Commands::Switch { branch, repo } => workstream::switch(repo.as_deref(), &branch),
+        Commands::Switch { branch, repo } => workstream::switch(repo.as_deref(), branch.as_deref()),
         Commands::Rm { branch, repo } => workstream::remove(repo.as_deref(), &branch),
         Commands::List { repo } => workstream::list(repo.as_deref()),
         Commands::Open => {

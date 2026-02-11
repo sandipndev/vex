@@ -21,11 +21,11 @@ pub enum Commands {
         repo: Option<String>,
     },
 
-    /// Switch to an existing workstream's tmux session
+    /// Switch to an existing workstream's tmux session (opens fzf picker if no branch given)
     #[command(alias = "attach")]
     Switch {
-        /// Branch name of the workstream
-        branch: String,
+        /// Branch name of the workstream (interactive picker if omitted)
+        branch: Option<String>,
 
         /// Repository name (defaults to current repo)
         #[arg(short, long)]
