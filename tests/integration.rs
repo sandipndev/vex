@@ -214,7 +214,7 @@ fn test_reload_shows_config() {
     assert!(output.contains("nvim"));
     assert!(output.contains("claude"));
     assert!(output.contains("zsh"));
-    assert!(output.contains("direnv allow"));
+    assert!(output.contains("on_create hooks: direnv allow"));
 }
 
 #[test]

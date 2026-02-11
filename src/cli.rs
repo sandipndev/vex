@@ -57,6 +57,16 @@ pub enum Commands {
     /// Open vex config in $EDITOR
     Config,
 
+    /// Sync PR metadata for workstreams
+    Sync {
+        /// Repository name (defaults to all repos)
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+
+    /// Fuzzy-pick a workstream to attach to
+    Open,
+
     /// Reload config and validate it
     Reload,
 

@@ -26,54 +26,29 @@ pub fn session_exists(name: &str) -> bool {
 }
 
 pub fn create_session(name: &str, working_dir: &str, config: &Config) -> Result<(), VexError> {
-    let hooks = &config.hooks.on_enter;
-    let hook_cmds = if hooks.is_empty() {
-        String::new()
-    } else {
-        hooks.join(" && ") + " && "
-    };
-
     // Create session with first window
     let first_window = config
         .windows
         .first()
         .ok_or_else(|| VexError::ConfigError("No windows configured".into()))?;
 
-    let first_cmd = if first_window.command.is_empty() {
-        hook_cmds.clone()
-    } else {
-        format!("{hook_cmds}{}", first_window.command)
-    };
+    run_tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        working_dir,
+        "-n",
+        &first_window.name,
+    ])?;
 
-    // Create detached session
-    if first_cmd.is_empty() {
-        run_tmux(&[
-            "new-session",
-            "-d",
-            "-s",
-            name,
-            "-c",
-            working_dir,
-            "-n",
-            &first_window.name,
-        ])?;
-    } else {
-        run_tmux(&[
-            "new-session",
-            "-d",
-            "-s",
-            name,
-            "-c",
-            working_dir,
-            "-n",
-            &first_window.name,
-        ])?;
-        // Send the command to the first window
+    if !first_window.command.is_empty() {
         run_tmux(&[
             "send-keys",
             "-t",
             &format!("{name}:{}", first_window.name),
-            &first_cmd,
+            &first_window.command,
             "Enter",
         ])?;
     }
@@ -90,18 +65,12 @@ pub fn create_session(name: &str, working_dir: &str, config: &Config) -> Result<
             working_dir,
         ])?;
 
-        let cmd = if window.command.is_empty() {
-            hook_cmds.clone()
-        } else {
-            format!("{hook_cmds}{}", window.command)
-        };
-
-        if !cmd.is_empty() {
+        if !window.command.is_empty() {
             run_tmux(&[
                 "send-keys",
                 "-t",
                 &format!("{name}:{}", window.name),
-                &cmd,
+                &window.command,
                 "Enter",
             ])?;
         }
