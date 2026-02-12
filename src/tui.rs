@@ -128,13 +128,7 @@ impl App {
     fn update_preview(&mut self) {
         if let Some(ws) = self.selected() {
             if ws.active {
-                let default_window = self
-                    .config
-                    .windows
-                    .first()
-                    .map(|w| w.name.as_str())
-                    .unwrap_or("0");
-                self.preview_content = tmux::capture_pane(&ws.session, default_window);
+                self.preview_content = tmux::capture_pane(&ws.session, &self.config.default_window);
             } else {
                 self.preview_content = "(session not active)".into();
             }
