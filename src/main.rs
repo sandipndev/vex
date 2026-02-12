@@ -4,6 +4,7 @@ mod error;
 mod git;
 mod repo;
 mod tmux;
+mod tui;
 mod workstream;
 
 use clap::{CommandFactory, Parser};
@@ -34,29 +35,30 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::New { branch, repo } => workstream::create(repo.as_deref(), &branch),
-        Commands::Switch { branch, repo } => workstream::switch(repo.as_deref(), branch.as_deref()),
-        Commands::Rm { branch, repo } => workstream::remove(repo.as_deref(), &branch),
-        Commands::List { repo } => workstream::list(repo.as_deref()),
-        Commands::Open => {
-            println_info!("TUI available shortly.");
-            Ok(())
+        None | Some(Commands::Open) => tui::run(),
+        Some(Commands::New { branch, repo }) => workstream::create(repo.as_deref(), &branch),
+        Some(Commands::Switch { branch, repo }) => {
+            workstream::switch(repo.as_deref(), branch.as_deref())
         }
-        Commands::Exit => workstream::exit(),
-        Commands::Rth { branch, repo } => workstream::rth(repo.as_deref(), branch.as_deref()),
-        Commands::Status { branch, repo } => workstream::status(repo.as_deref(), branch.as_deref()),
-        Commands::Rename {
+        Some(Commands::Rm { branch, repo }) => workstream::remove(repo.as_deref(), &branch),
+        Some(Commands::List { repo }) => workstream::list(repo.as_deref()),
+        Some(Commands::Exit) => workstream::exit(),
+        Some(Commands::Rth { branch, repo }) => workstream::rth(repo.as_deref(), branch.as_deref()),
+        Some(Commands::Status { branch, repo }) => {
+            workstream::status(repo.as_deref(), branch.as_deref())
+        }
+        Some(Commands::Rename {
             branch,
             new_branch,
             repo,
-        } => {
+        }) => {
             let (old, new_name) = match &new_branch {
                 Some(nb) => (Some(branch.as_str()), nb.as_str()),
                 None => (None, branch.as_str()),
             };
             workstream::rename(repo.as_deref(), old, new_name)
         }
-        Commands::Completions { shell } => cmd_completions(shell),
+        Some(Commands::Completions { shell }) => cmd_completions(shell),
     };
 
     if let Err(e) = result {

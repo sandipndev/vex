@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(name = "vex", about = "Parallel workstream manager", version)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]

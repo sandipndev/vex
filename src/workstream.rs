@@ -87,7 +87,7 @@ fn run_hooks(hooks: &[String], working_dir: &str) -> Result<(), VexError> {
     Ok(())
 }
 
-pub fn create(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
+pub fn create_no_attach(repo_name: Option<&str>, branch: &str) -> Result<String, VexError> {
     let mut repo_meta = match repo::resolve_repo(repo_name) {
         Ok(meta) => meta,
         Err(VexError::RepoNotInitialized(_) | VexError::NotAGitRepo) if repo_name.is_none() => {
@@ -140,9 +140,12 @@ pub fn create(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
 
     println_ok!("Workstream '{branch}' ready for repo '{}'", repo_meta.name);
 
-    // Attach
-    tmux::attach(&session)?;
+    Ok(session)
+}
 
+pub fn create(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
+    let session = create_no_attach(repo_name, branch)?;
+    tmux::attach(&session)?;
     Ok(())
 }
 
