@@ -88,6 +88,16 @@ pub fn status_short(cwd: &str) -> Result<String, VexError> {
     run_git(&["status", "--short"], Some(cwd))
 }
 
+pub fn rename_branch(repo_root: &str, old: &str, new: &str) -> Result<(), VexError> {
+    run_git(&["branch", "-m", old, new], Some(repo_root))?;
+    Ok(())
+}
+
+pub fn worktree_move(repo_root: &str, old_path: &str, new_path: &str) -> Result<(), VexError> {
+    run_git(&["worktree", "move", old_path, new_path], Some(repo_root))?;
+    Ok(())
+}
+
 pub fn delete_branch(repo_root: &str, branch: &str) -> Result<(), VexError> {
     // Best-effort: don't fail if branch can't be deleted
     let _ = run_git(&["branch", "-D", branch], Some(repo_root));

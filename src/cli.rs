@@ -72,6 +72,22 @@ pub enum Commands {
         repo: Option<String>,
     },
 
+    /// Rename a workstream (branch, worktree, tmux session, metadata)
+    ///
+    /// Inside a worktree: `vex rename <new-branch>` (old branch auto-detected from cwd)
+    /// Outside a worktree: `vex rename <old-branch> <new-branch> -r <repo>`
+    Rename {
+        /// New branch name (1 arg) or old branch name (2 args)
+        branch: String,
+
+        /// New branch name when two args are given
+        new_branch: Option<String>,
+
+        /// Repository name (defaults to current repo)
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
