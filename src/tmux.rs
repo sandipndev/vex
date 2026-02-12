@@ -76,12 +76,14 @@ pub fn create_session(name: &str, working_dir: &str, config: &Config) -> Result<
         }
     }
 
-    // Select first window
-    if let Some(w) = config.windows.first() {
-        let _ = run_tmux(&["select-window", "-t", &format!("{name}:{}", w.name)]);
-    }
+    // Select default window
+    select_window(name, &config.default_window);
 
     Ok(())
+}
+
+pub fn select_window(session: &str, window: &str) {
+    let _ = run_tmux(&["select-window", "-t", &format!("{session}:{window}")]);
 }
 
 pub fn detach() -> Result<(), VexError> {

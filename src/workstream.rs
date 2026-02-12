@@ -152,15 +152,16 @@ pub fn switch(repo_name: Option<&str>, branch: Option<&str>) -> Result<(), VexEr
         None => pick_workstream_fzf(repo_name)?,
     };
 
+    let config = Config::load_or_create()?;
     let session = tmux::session_name(&repo_name_resolved, &branch);
     if !tmux::session_exists(&session) {
-        let config = Config::load_or_create()?;
         let worktree_path = repo_worktree_dir(&repo_name_resolved)?.join(&branch);
         let worktree_str = worktree_path.to_string_lossy().to_string();
         println_info!("Recreating tmux session '{session}'...");
         tmux::create_session(&session, &worktree_str, &config)?;
     }
 
+    tmux::select_window(&session, &config.default_window);
     tmux::attach(&session)?;
     Ok(())
 }

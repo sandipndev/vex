@@ -10,6 +10,12 @@ pub struct Config {
     pub windows: Vec<Window>,
     #[serde(default)]
     pub hooks: Hooks,
+    #[serde(default = "default_window_default")]
+    pub default_window: String,
+}
+
+fn default_window_default() -> String {
+    "claude".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +55,7 @@ impl Default for Config {
                 on_create: vec!["direnv allow".into()],
                 on_enter: vec![],
             },
+            default_window: "claude".into(),
         }
     }
 }
@@ -122,6 +129,7 @@ mod tests {
         assert_eq!(config.windows[0].name, "nvim");
         assert_eq!(config.windows[1].name, "claude");
         assert_eq!(config.windows[2].name, "zsh");
+        assert_eq!(config.default_window, "claude");
     }
 
     #[test]
@@ -137,6 +145,7 @@ mod tests {
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.windows.len(), config.windows.len());
         assert_eq!(parsed.hooks.on_create, config.hooks.on_create);
+        assert_eq!(parsed.default_window, config.default_window);
         for (a, b) in parsed.windows.iter().zip(config.windows.iter()) {
             assert_eq!(a.name, b.name);
             assert_eq!(a.command, b.command);
