@@ -103,6 +103,36 @@ hooks:
 
 Use `-r <repo>` with `new`, `attach`, `rm`, `list` to target a repo from anywhere.
 
+## Tmux Plugin
+
+Vex includes a [TPM](https://github.com/tmux-plugins/tpm) plugin that binds `Prefix + V` to open the dashboard in a tmux floating popup (requires tmux 3.2+).
+
+### Install via TPM
+
+Add to your `~/.tmux.conf`:
+
+```bash
+set -g @plugin 'sandipndev/vex'
+```
+
+Then press `Prefix + I` to install.
+
+### Configuration
+
+| tmux option | Default | Description |
+|---|---|---|
+| `@vex-key` | `V` | Key after prefix to open popup |
+| `@vex-popup-width` | `80%` | Popup width |
+| `@vex-popup-height` | `80%` | Popup height |
+
+Example overrides in `~/.tmux.conf`:
+
+```bash
+set -g @vex-key 'V'
+set -g @vex-popup-width '60%'
+set -g @vex-popup-height '60%'
+```
+
 ## Environment
 
 - `VEX_HOME` — override config/worktree root (default: `~/.vex`)
