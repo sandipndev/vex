@@ -121,6 +121,13 @@ pub fn attach(name: &str) -> Result<(), VexError> {
     Ok(())
 }
 
+pub fn rename_session(old_name: &str, new_name: &str) -> Result<(), VexError> {
+    if session_exists(old_name) {
+        run_tmux(&["rename-session", "-t", old_name, new_name])?;
+    }
+    Ok(())
+}
+
 pub fn kill_session(name: &str) -> Result<(), VexError> {
     if session_exists(name) {
         run_tmux(&["kill-session", "-t", name])?;

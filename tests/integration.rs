@@ -148,6 +148,108 @@ fn test_config_creates_default() {
 }
 
 #[test]
+fn test_rename_workstream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vex_home = tmp.path().join("vex-home");
+    let repos_dir = tmp.path().join("repos");
+    fs::create_dir_all(&repos_dir).unwrap();
+
+    let repo_path = setup_git_repo(&repos_dir);
+    let vh = vex_home.to_str().unwrap();
+
+    register_repo(vh, &repo_path);
+
+    // Manually create branch + worktree + metadata (avoids tmux/hook failures)
+    let worktree_dir = std::path::Path::new(vh).join("worktrees").join("test-repo");
+    fs::create_dir_all(&worktree_dir).unwrap();
+    let wt_path = worktree_dir.join("feat-old");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feat-old",
+            wt_path.to_str().unwrap(),
+            "main",
+        ],
+        &repo_path,
+    );
+
+    // Write metadata with the workstream
+    let repo_config = std::path::Path::new(vh).join("repos").join("test-repo.yml");
+    let meta = format!(
+        "name: test-repo\npath: {repo_path}\ndefault_branch: main\nworkstreams:\n- branch: feat-old\n  created_at: '2025-01-01T00:00:00Z'\n"
+    );
+    fs::write(&repo_config, meta).unwrap();
+
+    // Rename the workstream with explicit old+new
+    let output = vex(
+        &["rename", "feat-old", "feat-new", "-r", "test-repo"],
+        &repo_path,
+        vh,
+    );
+    assert!(
+        output.status.success(),
+        "vex rename failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Verify metadata was updated
+    let contents = fs::read_to_string(&repo_config).unwrap();
+    assert!(
+        contents.contains("feat-new"),
+        "metadata should contain new branch name"
+    );
+    assert!(
+        !contents.contains("feat-old"),
+        "metadata should not contain old branch name"
+    );
+
+    // Verify worktree directory was moved
+    let old_worktree = worktree_dir.join("feat-old");
+    let new_worktree = worktree_dir.join("feat-new");
+    assert!(!old_worktree.exists(), "old worktree dir should not exist");
+    assert!(new_worktree.exists(), "new worktree dir should exist");
+
+    // Verify git branch was renamed
+    let branches = git(&["branch"], &repo_path);
+    assert!(branches.contains("feat-new"), "git should have new branch");
+    assert!(
+        !branches.contains("feat-old"),
+        "git should not have old branch"
+    );
+}
+
+#[test]
+fn test_rename_nonexistent_workstream_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vex_home = tmp.path().join("vex-home");
+    let repos_dir = tmp.path().join("repos");
+    fs::create_dir_all(&repos_dir).unwrap();
+
+    let repo_path = setup_git_repo(&repos_dir);
+    let vh = vex_home.to_str().unwrap();
+
+    register_repo(vh, &repo_path);
+
+    let output = vex(
+        &["rename", "nonexistent", "new-name", "-r", "test-repo"],
+        &repo_path,
+        vh,
+    );
+    assert!(
+        !output.status.success(),
+        "vex rename of nonexistent workstream should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "error should mention 'not found', got: {stderr}"
+    );
+}
+
+#[test]
 fn test_completions_zsh() {
     let tmp = tempfile::tempdir().unwrap();
     let vh = tmp.path().to_str().unwrap();

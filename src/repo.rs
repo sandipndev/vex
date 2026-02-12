@@ -56,6 +56,15 @@ impl RepoMetadata {
         self.workstreams.retain(|w| w.branch != branch);
     }
 
+    pub fn rename_workstream(&mut self, old_branch: &str, new_branch: &str) -> bool {
+        if let Some(entry) = self.workstreams.iter_mut().find(|w| w.branch == old_branch) {
+            entry.branch = new_branch.into();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn has_workstream(&self, branch: &str) -> bool {
         self.workstreams.iter().any(|w| w.branch == branch)
     }
@@ -198,6 +207,45 @@ mod tests {
         assert_eq!(parsed.workstreams.len(), 1);
         assert_eq!(parsed.workstreams[0].branch, "feat-x");
         assert_eq!(parsed.workstreams[0].pr_number, Some(99));
+    }
+
+    #[test]
+    fn rename_workstream_basic() {
+        let mut meta = make_meta();
+        meta.add_workstream("feat-old", None);
+        assert!(meta.rename_workstream("feat-old", "feat-new"));
+        assert!(meta.has_workstream("feat-new"));
+        assert!(!meta.has_workstream("feat-old"));
+    }
+
+    #[test]
+    fn rename_workstream_not_found() {
+        let mut meta = make_meta();
+        assert!(!meta.rename_workstream("nonexistent", "new-name"));
+        assert!(!meta.has_workstream("new-name"));
+    }
+
+    #[test]
+    fn rename_workstream_preserves_metadata() {
+        let mut meta = make_meta();
+        meta.add_workstream("feat-old", Some(42));
+        let created_at = meta.workstreams[0].created_at;
+        assert!(meta.rename_workstream("feat-old", "feat-new"));
+        assert_eq!(meta.workstreams[0].branch, "feat-new");
+        assert_eq!(meta.workstreams[0].pr_number, Some(42));
+        assert_eq!(meta.workstreams[0].created_at, created_at);
+    }
+
+    #[test]
+    fn rename_workstream_multiple() {
+        let mut meta = make_meta();
+        meta.add_workstream("feat-a", None);
+        meta.add_workstream("feat-b", None);
+        assert!(meta.rename_workstream("feat-a", "feat-c"));
+        assert!(meta.has_workstream("feat-c"));
+        assert!(meta.has_workstream("feat-b"));
+        assert!(!meta.has_workstream("feat-a"));
+        assert_eq!(meta.workstreams.len(), 2);
     }
 
     #[test]

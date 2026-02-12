@@ -45,6 +45,17 @@ fn main() {
         Commands::Exit => workstream::exit(),
         Commands::Rth { branch, repo } => workstream::rth(repo.as_deref(), branch.as_deref()),
         Commands::Status { branch, repo } => workstream::status(repo.as_deref(), branch.as_deref()),
+        Commands::Rename {
+            branch,
+            new_branch,
+            repo,
+        } => {
+            let (old, new_name) = match &new_branch {
+                Some(nb) => (Some(branch.as_str()), nb.as_str()),
+                None => (None, branch.as_str()),
+            };
+            workstream::rename(repo.as_deref(), old, new_name)
+        }
         Commands::Completions { shell } => cmd_completions(shell),
     };
 

@@ -394,6 +394,51 @@ pub fn status(repo_name: Option<&str>, branch: Option<&str>) -> Result<(), VexEr
     Ok(())
 }
 
+pub fn rename(
+    repo_name: Option<&str>,
+    old_branch: Option<&str>,
+    new_branch: &str,
+) -> Result<(), VexError> {
+    let (mut repo_meta, old_branch) = detect_workstream(repo_name, old_branch)?;
+
+    if repo_meta.has_workstream(new_branch) {
+        return Err(VexError::WorkstreamAlreadyExists {
+            repo: repo_meta.name.clone(),
+            branch: new_branch.into(),
+        });
+    }
+
+    // Rename git branch (most likely to fail — do first)
+    println_info!("Renaming branch '{old_branch}' -> '{new_branch}'...");
+    git::rename_branch(&repo_meta.path, &old_branch, new_branch)?;
+
+    // Move worktree directory
+    let worktree_base = repo_worktree_dir(&repo_meta.name)?;
+    let old_worktree = worktree_base.join(&old_branch);
+    let new_worktree = worktree_base.join(new_branch);
+    if old_worktree.exists() {
+        let old_str = old_worktree.to_string_lossy().to_string();
+        let new_str = new_worktree.to_string_lossy().to_string();
+        println_info!("Moving worktree...");
+        git::worktree_move(&repo_meta.path, &old_str, &new_str)?;
+    }
+
+    // Rename tmux session (best-effort)
+    let old_session = tmux::session_name(&repo_meta.name, &old_branch);
+    let new_session = tmux::session_name(&repo_meta.name, new_branch);
+    let _ = tmux::rename_session(&old_session, &new_session);
+
+    // Update metadata
+    repo_meta.rename_workstream(&old_branch, new_branch);
+    repo_meta.save()?;
+
+    println_ok!(
+        "Renamed workstream '{old_branch}' -> '{new_branch}' in repo '{}'",
+        repo_meta.name
+    );
+    Ok(())
+}
+
 pub fn exit() -> Result<(), VexError> {
     tmux::detach()
 }
