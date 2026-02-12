@@ -43,6 +43,10 @@ pub fn create_session(name: &str, working_dir: &str, config: &Config) -> Result<
         &first_window.name,
     ])?;
 
+    // Push session name into terminal/iTerm2 title bar
+    run_tmux(&["set-option", "-g", "set-titles", "on"])?;
+    run_tmux(&["set-option", "-g", "set-titles-string", "#S"])?;
+
     if !first_window.command.is_empty() {
         run_tmux(&[
             "send-keys",
