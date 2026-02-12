@@ -88,6 +88,9 @@ pub enum Commands {
         repo: Option<String>,
     },
 
+    /// Check environment health (required tools, config, repo setup)
+    Doctor,
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for

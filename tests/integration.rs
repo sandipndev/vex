@@ -250,6 +250,17 @@ fn test_rename_nonexistent_workstream_fails() {
 }
 
 #[test]
+fn test_doctor_basic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vex_home = tmp.path().join("vex-home");
+    let vh = vex_home.to_str().unwrap();
+
+    let output = vex_ok(&["doctor"], "/tmp", vh);
+    assert!(output.contains("git"), "doctor output should mention git");
+    assert!(output.contains("tmux"), "doctor output should mention tmux");
+}
+
+#[test]
 fn test_completions_zsh() {
     let tmp = tempfile::tempdir().unwrap();
     let vh = tmp.path().to_str().unwrap();
@@ -257,6 +268,40 @@ fn test_completions_zsh() {
     let output = vex_ok(&["completions", "zsh"], "/tmp", vh);
     assert!(output.contains("compdef"));
     assert!(output.contains("vex"));
+}
+
+#[test]
+fn test_first_run_shows_doctor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vex_home = tmp.path().join("vex-home");
+    let repos_dir = tmp.path().join("repos");
+    fs::create_dir_all(&repos_dir).unwrap();
+
+    let repo_path = setup_git_repo(&repos_dir);
+    let vh = vex_home.to_str().unwrap();
+
+    // Read-only command on fresh VEX_HOME should NOT trigger doctor
+    let output = vex_ok(&["list"], &repo_path, vh);
+    assert!(
+        !output.contains("First run"),
+        "list should not trigger first-run doctor"
+    );
+
+    // Mutative command on fresh VEX_HOME should trigger doctor
+    let tmp2 = tempfile::tempdir().unwrap();
+    let vex_home2 = tmp2.path().join("vex-home2");
+    let vh2 = vex_home2.to_str().unwrap();
+
+    let output = vex(&["new", "feat-doc"], &repo_path, vh2);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("First run"),
+        "new on fresh home should show first-run message, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("git"),
+        "first-run doctor should check git, got: {stdout}"
+    );
 }
 
 #[test]

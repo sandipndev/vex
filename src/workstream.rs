@@ -447,6 +447,73 @@ pub fn exit() -> Result<(), VexError> {
     tmux::detach()
 }
 
+pub fn doctor() -> Result<(), VexError> {
+    // Required tools
+    for (tool, args) in [("git", &["--version"] as &[&str]), ("tmux", &["-V"])] {
+        match Command::new(tool).args(args).output() {
+            Ok(output) if output.status.success() => {
+                let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("[ok] {tool}: {ver}");
+            }
+            _ => {
+                println!("[FAIL] {tool}: not found (required)");
+            }
+        }
+    }
+
+    // Optional tools
+    for (tool, args, hint) in [
+        (
+            "fzf",
+            &["--version"] as &[&str],
+            "needed for `vex switch` picker",
+        ),
+        ("claude", &["--version"], "default window command"),
+    ] {
+        match Command::new(tool).args(args).output() {
+            Ok(output) if output.status.success() => {
+                let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("[ok] {tool}: {ver}");
+            }
+            _ => {
+                println!("[warn] {tool}: not found ({hint})");
+            }
+        }
+    }
+
+    // Config check
+    match Config::load_or_create() {
+        Ok(_) => {
+            let path = Config::path().unwrap_or_default();
+            let display = path.display();
+            println!("[ok] config: {display}");
+        }
+        Err(e) => {
+            println!("[warn] config: {e}");
+        }
+    }
+
+    // Repo checks — only when inside a git repo
+    if let Ok(repo_root) = crate::git::repo_root() {
+        if let Ok(name) = crate::git::repo_name(&repo_root) {
+            match repo::resolve_repo(Some(&name)) {
+                Ok(_) => println!("[ok] repo: {name} (registered)"),
+                Err(_) => println!("[warn] repo: {name} (not registered — run `vex new <branch>`)"),
+            }
+        }
+
+        // Check for .devcontainer/
+        let devcontainer = std::path::Path::new(&repo_root).join(".devcontainer");
+        if devcontainer.exists() {
+            println!("[ok] devcontainer: .devcontainer/ found");
+        } else {
+            println!("[warn] devcontainer: .devcontainer/ not found");
+        }
+    }
+
+    Ok(())
+}
+
 pub fn rth(repo_name: Option<&str>, branch: Option<&str>) -> Result<(), VexError> {
     let (repo_meta, _branch) = detect_workstream(repo_name, branch)?;
     print!("{}", repo_meta.path);

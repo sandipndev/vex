@@ -34,6 +34,20 @@ macro_rules! println_err {
 fn main() {
     let cli = Cli::parse();
 
+    if config::is_first_run()
+        && let None
+        | Some(Commands::Open)
+        | Some(Commands::New { .. })
+        | Some(Commands::Switch { .. })
+        | Some(Commands::Rm { .. })
+        | Some(Commands::Exit)
+        | Some(Commands::Rename { .. }) = &cli.command
+    {
+        println_info!("First run detected — running health check...\n");
+        let _ = workstream::doctor();
+        println!();
+    }
+
     let result = match cli.command {
         None | Some(Commands::Open) => tui::run(),
         Some(Commands::New { branch, repo }) => workstream::create(repo.as_deref(), &branch),
@@ -58,6 +72,7 @@ fn main() {
             };
             workstream::rename(repo.as_deref(), old, new_name)
         }
+        Some(Commands::Doctor) => workstream::doctor(),
         Some(Commands::Completions { shell }) => cmd_completions(shell),
     };
 

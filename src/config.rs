@@ -102,6 +102,10 @@ pub fn vex_home() -> Result<PathBuf, VexError> {
     Ok(home.join(".vex"))
 }
 
+pub fn is_first_run() -> bool {
+    vex_home().map(|p| !p.exists()).unwrap_or(false)
+}
+
 pub fn repos_dir() -> Result<PathBuf, VexError> {
     Ok(vex_home()?.join("repos"))
 }
