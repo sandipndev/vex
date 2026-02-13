@@ -424,26 +424,38 @@ fn run_loop(
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let size = f.area();
 
-    // Main layout: content area + status + help bar
+    // Main layout: header + content area + status + help bar
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1), // header
             Constraint::Min(3),    // content
             Constraint::Length(1), // status
             Constraint::Length(1), // help
         ])
         .split(size);
 
+    draw_header(f, outer[0]);
+
     // Content: left list + right preview
     let content = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(outer[0]);
+        .split(outer[1]);
 
     draw_list(f, app, content[0]);
     draw_preview(f, app, content[1]);
-    draw_status(f, app, outer[1]);
-    draw_help(f, app, outer[2]);
+    draw_status(f, app, outer[2]);
+    draw_help(f, app, outer[3]);
+}
+
+fn draw_header(f: &mut ratatui::Frame, area: Rect) {
+    let version = env!("CARGO_PKG_VERSION");
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(" vex ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("v{version}"), Style::default().fg(Color::DarkGray)),
+    ]));
+    f.render_widget(header, area);
 }
 
 fn draw_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
