@@ -452,7 +452,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 fn draw_header(f: &mut ratatui::Frame, area: Rect) {
     let version = env!("CARGO_PKG_VERSION");
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(" vex ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " vex ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("v{version}"), Style::default().fg(Color::DarkGray)),
     ]));
     f.render_widget(header, area);
