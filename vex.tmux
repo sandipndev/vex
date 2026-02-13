@@ -13,7 +13,7 @@ get_tmux_option() {
 }
 
 main() {
-    local key=$(get_tmux_option "@vex-key" "V")
+    local key=$(get_tmux_option "@vex-key" "C-v")
     local popup_width=$(get_tmux_option "@vex-popup-width" "80%")
     local popup_height=$(get_tmux_option "@vex-popup-height" "80%")
 
