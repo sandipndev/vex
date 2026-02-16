@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use chrono::{DateTime, Utc};
@@ -71,6 +72,54 @@ fn detect_workstream(
     )))
 }
 
+fn create_symlinks(
+    repo_path: &str,
+    worktree_path: &str,
+    global: &[String],
+    per_repo: &[String],
+) -> Result<(), VexError> {
+    // Resolve effective list: start with global, apply per-repo overrides
+    let mut effective: Vec<String> = global.to_vec();
+    for entry in per_repo {
+        if let Some(denied) = entry.strip_prefix('!') {
+            effective.retain(|e| e != denied);
+        } else if !effective.contains(entry) {
+            effective.push(entry.clone());
+        }
+    }
+
+    if effective.is_empty() {
+        return Ok(());
+    }
+
+    let repo = Path::new(repo_path);
+    let worktree = Path::new(worktree_path);
+
+    for file in &effective {
+        let source = repo.join(file);
+        let target = worktree.join(file);
+
+        if !source.exists() {
+            continue;
+        }
+        if target.exists() {
+            continue;
+        }
+
+        // Create parent directories if needed
+        if let Some(parent) = target.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).map_err(|e| VexError::io(parent, e))?;
+        }
+
+        std::os::unix::fs::symlink(&source, &target).map_err(|e| VexError::io(&target, e))?;
+        println_info!("Symlinked {file}");
+    }
+
+    Ok(())
+}
+
 fn run_hooks(hooks: &[String], working_dir: &str) -> Result<(), VexError> {
     for hook in hooks {
         println_info!("  $ {hook}");
@@ -126,6 +175,14 @@ pub fn create_no_attach(
     // Create worktree off chosen base branch
     println_info!("Creating new branch '{branch}' off '{base}'...");
     git::worktree_add_new(&repo_meta.path, &worktree_str, branch, &base)?;
+
+    // Symlink configured files from source repo into worktree
+    create_symlinks(
+        &repo_meta.path,
+        &worktree_str,
+        &config.symlinks,
+        &repo_meta.symlinks,
+    )?;
 
     // Run on_create hooks in the worktree directory
     if !config.hooks.on_create.is_empty() {

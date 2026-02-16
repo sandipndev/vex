@@ -14,6 +14,8 @@ pub struct RepoMetadata {
     pub default_branch: String,
     #[serde(default)]
     pub workstreams: Vec<WorkstreamEntry>,
+    #[serde(default)]
+    pub symlinks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +103,7 @@ pub fn init_repo() -> Result<RepoMetadata, VexError> {
         path: repo_root,
         default_branch,
         workstreams: vec![],
+        symlinks: vec![],
     };
     meta.save()?;
     Ok(meta)
@@ -171,6 +174,7 @@ mod tests {
             path: "/tmp/test-repo".into(),
             default_branch: "main".into(),
             workstreams: vec![],
+            symlinks: vec![],
         }
     }
 
