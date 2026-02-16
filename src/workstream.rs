@@ -412,6 +412,10 @@ pub fn rename(
         });
     }
 
+    // Check if the old tmux session exists (we'll recreate it after rename)
+    let old_session = tmux::session_name(&repo_meta.name, &old_branch);
+    let had_session = tmux::session_exists(&old_session);
+
     // Rename git branch (most likely to fail — do first)
     println_info!("Renaming branch '{old_branch}' -> '{new_branch}'...");
     git::rename_branch(&repo_meta.path, &old_branch, new_branch)?;
@@ -427,10 +431,15 @@ pub fn rename(
         git::worktree_move(&repo_meta.path, &old_str, &new_str)?;
     }
 
-    // Rename tmux session (best-effort)
-    let old_session = tmux::session_name(&repo_meta.name, &old_branch);
+    // Kill old tmux session and recreate with new path
     let new_session = tmux::session_name(&repo_meta.name, new_branch);
-    let _ = tmux::rename_session(&old_session, &new_session);
+    if had_session {
+        println_info!("Recreating tmux session...");
+        let _ = tmux::kill_session(&old_session);
+        let config = Config::load_or_create()?;
+        let new_dir = new_worktree.to_string_lossy().to_string();
+        tmux::create_session(&new_session, &new_dir, &config)?;
+    }
 
     // Update metadata
     repo_meta.rename_workstream(&old_branch, new_branch);
@@ -440,6 +449,12 @@ pub fn rename(
         "Renamed workstream '{old_branch}' -> '{new_branch}' in repo '{}'",
         repo_meta.name
     );
+
+    // If we were in the old session, attach to the new one
+    if had_session {
+        tmux::attach(&new_session)?;
+    }
+
     Ok(())
 }
 
