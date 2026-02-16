@@ -50,7 +50,9 @@ fn main() {
 
     let result = match cli.command {
         None | Some(Commands::Open) => tui::run(),
-        Some(Commands::New { branch, repo }) => workstream::create(repo.as_deref(), &branch),
+        Some(Commands::New { branch, from, repo }) => {
+            workstream::create(repo.as_deref(), &branch, from.as_deref())
+        }
         Some(Commands::Switch { branch, repo }) => {
             workstream::switch(repo.as_deref(), branch.as_deref())
         }

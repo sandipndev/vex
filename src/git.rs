@@ -98,6 +98,19 @@ pub fn worktree_move(repo_root: &str, old_path: &str, new_path: &str) -> Result<
     Ok(())
 }
 
+pub fn list_branches(repo_root: &str) -> Result<Vec<String>, VexError> {
+    let output = run_git(
+        &["branch", "-a", "--format=%(refname:short)"],
+        Some(repo_root),
+    )?;
+    Ok(output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .map(|l| l.to_string())
+        .collect())
+}
+
 pub fn delete_branch(repo_root: &str, branch: &str) -> Result<(), VexError> {
     // Best-effort: don't fail if branch can't be deleted
     let _ = run_git(&["branch", "-D", branch], Some(repo_root));
