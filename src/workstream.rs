@@ -1,6 +1,8 @@
 use std::fs;
 use std::process::Command;
 
+use chrono::{DateTime, Utc};
+
 use crate::config::{Config, repo_worktree_dir};
 use crate::error::VexError;
 use crate::repo::{self, RepoMetadata};
@@ -164,6 +166,12 @@ pub fn switch(repo_name: Option<&str>, branch: Option<&str>) -> Result<(), VexEr
         tmux::create_session(&session, &worktree_str, &config)?;
     }
 
+    // Update last-accessed timestamp
+    if let Ok(mut repo_meta) = repo::resolve_repo(Some(&repo_name_resolved)) {
+        repo_meta.touch_workstream(&branch);
+        let _ = repo_meta.save();
+    }
+
     tmux::select_window(&session, &config.default_window);
     tmux::attach(&session)?;
     Ok(())
@@ -213,7 +221,7 @@ fn pick_workstream_fzf(repo_name: Option<&str>) -> Result<(String, String), VexE
 
     let active_sessions = tmux::list_sessions().unwrap_or_default();
 
-    let mut entries: Vec<(String, String, String)> = Vec::new();
+    let mut entries: Vec<(String, String, String, DateTime<Utc>)> = Vec::new();
     for repo_meta in &repos {
         for ws in &repo_meta.workstreams {
             let session = tmux::session_name(&repo_meta.name, &ws.branch);
@@ -223,9 +231,11 @@ fn pick_workstream_fzf(repo_name: Option<&str>) -> Result<(String, String), VexE
                 ""
             };
             let display = format!("{}/{}{}", repo_meta.name, ws.branch, active);
-            entries.push((display, repo_meta.name.clone(), ws.branch.clone()));
+            let sort_key = ws.last_accessed_at.unwrap_or(ws.created_at);
+            entries.push((display, repo_meta.name.clone(), ws.branch.clone(), sort_key));
         }
     }
+    entries.sort_by(|a, b| b.3.cmp(&a.3));
 
     if entries.is_empty() {
         return Err(VexError::ConfigError("No workstreams found.".into()));
@@ -233,7 +243,7 @@ fn pick_workstream_fzf(repo_name: Option<&str>) -> Result<(String, String), VexE
 
     let input = entries
         .iter()
-        .map(|(d, _, _)| d.as_str())
+        .map(|(d, _, _, _)| d.as_str())
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -270,9 +280,9 @@ fn pick_workstream_fzf(repo_name: Option<&str>) -> Result<(String, String), VexE
         return Err(VexError::ConfigError("cancelled".into()));
     }
 
-    let (_display, repo, branch) = entries
+    let (_display, repo, branch, _) = entries
         .iter()
-        .find(|(d, _, _)| d == &selected)
+        .find(|(d, _, _, _)| d == &selected)
         .ok_or_else(|| VexError::ConfigError("selection not found".into()))?;
 
     Ok((repo.clone(), branch.clone()))

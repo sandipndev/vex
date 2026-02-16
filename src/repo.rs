@@ -22,6 +22,8 @@ pub struct WorkstreamEntry {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub pr_number: Option<u64>,
+    #[serde(default)]
+    pub last_accessed_at: Option<DateTime<Utc>>,
 }
 
 impl RepoMetadata {
@@ -44,10 +46,12 @@ impl RepoMetadata {
 
     pub fn add_workstream(&mut self, branch: &str, pr_number: Option<u64>) {
         if !self.workstreams.iter().any(|w| w.branch == branch) {
+            let now = Utc::now();
             self.workstreams.push(WorkstreamEntry {
                 branch: branch.into(),
-                created_at: Utc::now(),
+                created_at: now,
                 pr_number,
+                last_accessed_at: Some(now),
             });
         }
     }
@@ -67,6 +71,12 @@ impl RepoMetadata {
 
     pub fn has_workstream(&self, branch: &str) -> bool {
         self.workstreams.iter().any(|w| w.branch == branch)
+    }
+
+    pub fn touch_workstream(&mut self, branch: &str) {
+        if let Some(entry) = self.workstreams.iter_mut().find(|w| w.branch == branch) {
+            entry.last_accessed_at = Some(Utc::now());
+        }
     }
 }
 
