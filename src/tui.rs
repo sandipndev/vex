@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 use crate::config::Config;
 use crate::error::VexError;
+use crate::git;
 use crate::repo;
 use crate::tmux;
 use crate::workstream;
@@ -35,6 +36,7 @@ impl WorkstreamItem {
 enum InputMode {
     Normal,
     CreateNew,
+    SelectBaseBranch,
     Rename,
     ConfirmDelete,
 }
@@ -50,6 +52,11 @@ struct App {
     should_switch: Option<String>,
     status_message: Option<(String, Instant)>,
     should_quit: bool,
+    // Branch picker state for two-step create flow
+    pending_new_branch: String,
+    branch_candidates: Vec<String>,
+    branch_filter: String,
+    branch_list_state: ListState,
 }
 
 impl App {
@@ -65,6 +72,10 @@ impl App {
             should_switch: None,
             status_message: None,
             should_quit: false,
+            pending_new_branch: String::new(),
+            branch_candidates: Vec::new(),
+            branch_filter: String::new(),
+            branch_list_state: ListState::default(),
         };
         app.refresh_workstreams();
         if !app.workstreams.is_empty() {
@@ -196,16 +207,69 @@ impl App {
 
     fn confirm_create(&mut self) {
         let branch = self.input_buffer.trim().to_string();
-        self.input_mode = InputMode::Normal;
         if branch.is_empty() {
+            self.input_mode = InputMode::Normal;
             self.set_status("Cancelled: empty branch name");
             return;
         }
-        match workstream::create_no_attach(None, &branch) {
+        // Save branch name and transition to base branch picker
+        self.pending_new_branch = branch;
+        self.branch_filter.clear();
+
+        // Determine repo path for listing branches
+        let repo_path = repo::list_repos()
+            .ok()
+            .and_then(|repos| repos.into_iter().next())
+            .map(|r| r.path)
+            .or_else(|| git::repo_root().ok());
+
+        let Some(path) = repo_path else {
+            // No repo found, just create with default base
+            self.do_create_workstream(&self.pending_new_branch.clone(), None);
+            return;
+        };
+
+        self.branch_candidates = git::list_branches(&path).unwrap_or_default();
+        self.branch_list_state
+            .select(if self.branch_candidates.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
+        self.input_mode = InputMode::SelectBaseBranch;
+    }
+
+    fn filtered_branches(&self) -> Vec<(usize, &str)> {
+        self.branch_candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| {
+                self.branch_filter.is_empty()
+                    || b.to_lowercase()
+                        .contains(&self.branch_filter.to_lowercase())
+            })
+            .map(|(i, b)| (i, b.as_str()))
+            .collect()
+    }
+
+    fn confirm_base_branch(&mut self) {
+        let filtered = self.filtered_branches();
+        let selected = self
+            .branch_list_state
+            .selected()
+            .and_then(|i| filtered.get(i))
+            .map(|(_, b)| b.to_string());
+
+        let branch = self.pending_new_branch.clone();
+        self.do_create_workstream(&branch, selected.as_deref());
+    }
+
+    fn do_create_workstream(&mut self, branch: &str, base: Option<&str>) {
+        self.input_mode = InputMode::Normal;
+        match workstream::create_no_attach(None, branch, base) {
             Ok(_session) => {
                 self.set_status(format!("Created workstream '{branch}'"));
                 self.refresh_workstreams();
-                // Select the newly created workstream
                 if let Some(idx) = self.workstreams.iter().position(|w| w.branch == branch) {
                     self.list_state.select(Some(idx));
                 }
@@ -386,6 +450,54 @@ fn run_loop(
                     }
                     _ => app.handle_input_key(key.code),
                 },
+                InputMode::SelectBaseBranch => match key.code {
+                    KeyCode::Enter => app.confirm_base_branch(),
+                    KeyCode::Esc => {
+                        app.input_mode = InputMode::Normal;
+                        app.set_status("Cancelled");
+                    }
+                    KeyCode::Down | KeyCode::Tab => {
+                        let count = app.filtered_branches().len();
+                        if count > 0 {
+                            let i = app
+                                .branch_list_state
+                                .selected()
+                                .map(|i| if i + 1 < count { i + 1 } else { 0 })
+                                .unwrap_or(0);
+                            app.branch_list_state.select(Some(i));
+                        }
+                    }
+                    KeyCode::Up => {
+                        let count = app.filtered_branches().len();
+                        if count > 0 {
+                            let i = app
+                                .branch_list_state
+                                .selected()
+                                .map(|i| if i > 0 { i - 1 } else { count - 1 })
+                                .unwrap_or(0);
+                            app.branch_list_state.select(Some(i));
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        app.branch_filter.pop();
+                        app.branch_list_state
+                            .select(if app.filtered_branches().is_empty() {
+                                None
+                            } else {
+                                Some(0)
+                            });
+                    }
+                    KeyCode::Char(c) => {
+                        app.branch_filter.push(c);
+                        app.branch_list_state
+                            .select(if app.filtered_branches().is_empty() {
+                                None
+                            } else {
+                                Some(0)
+                            });
+                    }
+                    _ => {}
+                },
                 InputMode::Rename => match key.code {
                     KeyCode::Enter => app.confirm_rename(),
                     KeyCode::Esc => {
@@ -444,7 +556,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .split(outer[1]);
 
     draw_list(f, app, content[0]);
-    draw_preview(f, app, content[1]);
+    if app.input_mode == InputMode::SelectBaseBranch {
+        draw_branch_picker(f, app, content[1]);
+    } else {
+        draw_preview(f, app, content[1]);
+    }
     draw_status(f, app, outer[2]);
     draw_help(f, app, outer[3]);
 }
@@ -512,11 +628,47 @@ fn draw_preview(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(preview, area);
 }
 
+fn draw_branch_picker(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let filtered: Vec<ListItem> = app
+        .filtered_branches()
+        .iter()
+        .map(|(_, b)| {
+            ListItem::new(Line::from(Span::styled(
+                b.to_string(),
+                Style::default().fg(Color::White),
+            )))
+        })
+        .collect();
+
+    let title = format!(" Select base branch for '{}' ", app.pending_new_branch);
+    let list = List::new(filtered)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .highlight_style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Cyan),
+        )
+        .highlight_symbol("> ");
+
+    f.render_stateful_widget(list, area, &mut app.branch_list_state);
+}
+
 fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let content = match &app.input_mode {
         InputMode::CreateNew => {
             let label = Span::styled("New branch: ", Style::default().fg(Color::Yellow));
             let input = Span::raw(&app.input_buffer);
+            let cursor = Span::styled("_", Style::default().fg(Color::Yellow));
+            Line::from(vec![label, input, cursor])
+        }
+        InputMode::SelectBaseBranch => {
+            let label = Span::styled("Base branch: ", Style::default().fg(Color::Yellow));
+            let input = Span::raw(&app.branch_filter);
             let cursor = Span::styled("_", Style::default().fg(Color::Yellow));
             Line::from(vec![label, input, cursor])
         }
@@ -553,6 +705,9 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let help_text = match app.input_mode {
         InputMode::Normal => "[Enter] Switch  [n] New  [d] Delete  [r] Rename  [q] Quit",
         InputMode::CreateNew | InputMode::Rename => "[Enter] Confirm  [Esc] Cancel",
+        InputMode::SelectBaseBranch => {
+            "[Enter] Select  [Up/Down] Navigate  [type] Filter  [Esc] Cancel"
+        }
         InputMode::ConfirmDelete => "[y] Confirm  [any] Cancel",
     };
 

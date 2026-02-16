@@ -16,6 +16,10 @@ pub enum Commands {
         /// Branch name
         branch: String,
 
+        /// Base branch to create from (interactive picker if omitted)
+        #[arg(short, long)]
+        from: Option<String>,
+
         /// Repository name (defaults to current repo)
         #[arg(short, long)]
         repo: Option<String>,

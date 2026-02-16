@@ -89,7 +89,11 @@ fn run_hooks(hooks: &[String], working_dir: &str) -> Result<(), VexError> {
     Ok(())
 }
 
-pub fn create_no_attach(repo_name: Option<&str>, branch: &str) -> Result<String, VexError> {
+pub fn create_no_attach(
+    repo_name: Option<&str>,
+    branch: &str,
+    from: Option<&str>,
+) -> Result<String, VexError> {
     let mut repo_meta = match repo::resolve_repo(repo_name) {
         Ok(meta) => meta,
         Err(VexError::RepoNotInitialized(_) | VexError::NotAGitRepo) if repo_name.is_none() => {
@@ -107,23 +111,21 @@ pub fn create_no_attach(repo_name: Option<&str>, branch: &str) -> Result<String,
         });
     }
 
+    // Determine base branch
+    let base = match from {
+        Some(b) => b.to_string(),
+        None => pick_branch_fzf(&repo_meta.path, &repo_meta.default_branch)?,
+    };
+
     // Set up worktree directory
     let worktree_base = repo_worktree_dir(&repo_meta.name)?;
     fs::create_dir_all(&worktree_base).map_err(|e| VexError::io(&worktree_base, e))?;
     let worktree_path = worktree_base.join(branch);
     let worktree_str = worktree_path.to_string_lossy().to_string();
 
-    // Create worktree off local default branch
-    println_info!(
-        "Creating new branch '{branch}' off '{}'...",
-        repo_meta.default_branch
-    );
-    git::worktree_add_new(
-        &repo_meta.path,
-        &worktree_str,
-        branch,
-        &repo_meta.default_branch,
-    )?;
+    // Create worktree off chosen base branch
+    println_info!("Creating new branch '{branch}' off '{base}'...");
+    git::worktree_add_new(&repo_meta.path, &worktree_str, branch, &base)?;
 
     // Run on_create hooks in the worktree directory
     if !config.hooks.on_create.is_empty() {
@@ -145,8 +147,59 @@ pub fn create_no_attach(repo_name: Option<&str>, branch: &str) -> Result<String,
     Ok(session)
 }
 
-pub fn create(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
-    let session = create_no_attach(repo_name, branch)?;
+fn pick_branch_fzf(repo_path: &str, default_branch: &str) -> Result<String, VexError> {
+    let branches = git::list_branches(repo_path)?;
+    if branches.is_empty() {
+        return Ok(default_branch.to_string());
+    }
+
+    let input = branches.join("\n");
+
+    let fzf = Command::new("fzf")
+        .args([
+            "--prompt",
+            "base branch> ",
+            "--height",
+            "~40%",
+            "--reverse",
+            "--query",
+            default_branch,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+
+    let mut child = match fzf {
+        Ok(c) => c,
+        Err(_) => {
+            // fzf not available — fall back to default branch
+            return Ok(default_branch.to_string());
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(input.as_bytes());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| VexError::ConfigError(format!("fzf failed: {e}")))?;
+
+    if !output.status.success() {
+        return Err(VexError::ConfigError("cancelled".into()));
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        return Err(VexError::ConfigError("cancelled".into()));
+    }
+
+    Ok(selected)
+}
+
+pub fn create(repo_name: Option<&str>, branch: &str, from: Option<&str>) -> Result<(), VexError> {
+    let session = create_no_attach(repo_name, branch, from)?;
     tmux::attach(&session)?;
     Ok(())
 }
