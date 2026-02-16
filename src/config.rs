@@ -12,6 +12,8 @@ pub struct Config {
     pub hooks: Hooks,
     #[serde(default = "default_window_default")]
     pub default_window: String,
+    #[serde(default)]
+    pub symlinks: Vec<String>,
 }
 
 fn default_window_default() -> String {
@@ -56,6 +58,7 @@ impl Default for Config {
                 on_enter: vec![],
             },
             default_window: "claude".into(),
+            symlinks: vec![],
         }
     }
 }
