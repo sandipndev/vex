@@ -1,6 +1,6 @@
 [package]
 name = "vex-cli"
-version = "0.2.13-dev"
+version = "0.2.13"
 edition = "2024"
 description = "Parallel workstream manager using git worktrees and tmux"
 license = "MIT"
