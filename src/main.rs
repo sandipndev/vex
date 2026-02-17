@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod error;
 mod git;
+mod github;
 mod repo;
 mod tmux;
 mod tui;

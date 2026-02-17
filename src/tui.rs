@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::io;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
+use ansi_to_tui::IntoText as _;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
@@ -14,6 +17,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use crate::config::Config;
 use crate::error::VexError;
 use crate::git;
+use crate::github;
 use crate::repo;
 use crate::tmux;
 use crate::workstream;
@@ -23,18 +27,31 @@ struct WorkstreamItem {
     branch: String,
     session: String,
     active: bool,
+    pr_number: Option<u64>,
+    repo_path: String,
 }
 
 impl WorkstreamItem {
     fn display(&self) -> String {
+        let pr = match self.pr_number {
+            Some(n) => format!(" #{n}"),
+            None => String::new(),
+        };
         let active_marker = if self.active { " [active]" } else { "" };
-        format!("{}/{}{}", self.repo_name, self.branch, active_marker)
+        format!("{}/{}{}{}", self.repo_name, self.branch, pr, active_marker)
     }
+}
+
+#[derive(Clone, PartialEq)]
+enum PanelView {
+    DefaultWindow,
+    GitHubPr,
 }
 
 #[derive(PartialEq)]
 enum InputMode {
     Normal,
+    Interact,
     CreateNew,
     SelectBaseBranch,
     Rename,
@@ -57,6 +74,15 @@ struct App {
     branch_candidates: Vec<String>,
     branch_filter: String,
     branch_list_state: ListState,
+    // Panel cycling and scroll
+    panel_view: PanelView,
+    github_content: String,
+    panel_scroll: u16,
+    pr_cache: HashMap<String, Option<u64>>,
+    // Pane resize tracking
+    preview_inner_size: (u16, u16),
+    /// (session:window target, original_width, original_height)
+    resized_session: Option<(String, u16, u16)>,
 }
 
 impl App {
@@ -76,13 +102,46 @@ impl App {
             branch_candidates: Vec::new(),
             branch_filter: String::new(),
             branch_list_state: ListState::default(),
+            panel_view: PanelView::DefaultWindow,
+            github_content: String::new(),
+            panel_scroll: 0,
+            pr_cache: HashMap::new(),
+            preview_inner_size: (0, 0),
+            resized_session: None,
         };
         app.refresh_workstreams();
+        app.load_pr_cache();
         if !app.workstreams.is_empty() {
             app.list_state.select(Some(0));
             app.update_preview();
         }
         app
+    }
+
+    fn load_pr_cache(&mut self) {
+        // Collect unique repo paths
+        let mut repo_paths: Vec<String> = self
+            .workstreams
+            .iter()
+            .map(|w| w.repo_path.clone())
+            .collect();
+        repo_paths.sort();
+        repo_paths.dedup();
+
+        // One gh call per repo
+        for path in &repo_paths {
+            if let Ok(prs) = github::list_prs(path) {
+                for (branch, num) in prs {
+                    self.pr_cache.insert(format!("{path}/{branch}"), Some(num));
+                }
+            }
+        }
+
+        // Assign pr_number to each workstream item
+        for ws in &mut self.workstreams {
+            let key = format!("{}/{}", ws.repo_path, ws.branch);
+            ws.pr_number = self.pr_cache.get(&key).copied().flatten();
+        }
     }
 
     fn refresh_workstreams(&mut self) {
@@ -96,11 +155,16 @@ impl App {
             for ws in &repo_meta.workstreams {
                 let session = tmux::session_name(&repo_meta.name, &ws.branch);
                 let active = active_sessions.contains(&session);
+                // Reuse cached PR number
+                let key = format!("{}/{}", repo_meta.path, ws.branch);
+                let pr_number = self.pr_cache.get(&key).copied().flatten();
                 items.push(WorkstreamItem {
                     repo_name: repo_meta.name.clone(),
                     branch: ws.branch.clone(),
                     session,
                     active,
+                    pr_number,
+                    repo_path: repo_meta.path.clone(),
                 });
             }
         }
@@ -137,14 +201,58 @@ impl App {
     }
 
     fn update_preview(&mut self) {
-        if let Some(ws) = self.selected() {
-            if ws.active {
-                self.preview_content = tmux::capture_pane(&ws.session, &self.config.default_window);
-            } else {
-                self.preview_content = "(session not active)".into();
+        match self.panel_view {
+            PanelView::DefaultWindow => {
+                // Extract needed values to avoid borrow conflicts
+                let ws_info = self.selected().map(|ws| (ws.session.clone(), ws.active));
+                let default_window = self.config.default_window.clone();
+
+                if let Some((session, active)) = ws_info {
+                    if active {
+                        let (pw, ph) = self.preview_inner_size;
+                        if pw > 0 && ph > 0 {
+                            self.ensure_pane_resized(&session, &default_window, pw, ph);
+                        }
+                        self.preview_content = tmux::capture_pane_ansi(&session, &default_window);
+                    } else {
+                        self.preview_content = "(session not active)".into();
+                    }
+                } else {
+                    self.preview_content = "(no workstreams)".into();
+                }
             }
-        } else {
-            self.preview_content = "(no workstreams)".into();
+            PanelView::GitHubPr => {
+                // Skip — fetched on demand when Tab toggles to it
+            }
+        }
+    }
+
+    fn ensure_pane_resized(&mut self, session: &str, window: &str, width: u16, height: u16) {
+        let target = format!("{session}:{window}");
+
+        if let Some((ref t, _, _)) = self.resized_session
+            && *t != target
+        {
+            // Different session — restore the old one before resizing the new one
+            self.restore_pane_size();
+        }
+
+        if self.resized_session.as_ref().is_none_or(|r| r.0 != target) {
+            // Save original size before first resize of this session
+            if let Some((orig_w, orig_h)) = tmux::window_size(session, window) {
+                self.resized_session = Some((target, orig_w, orig_h));
+            }
+        }
+
+        tmux::resize_window(session, window, width, height);
+    }
+
+    fn restore_pane_size(&mut self) {
+        if let Some((target, orig_w, orig_h)) = self.resized_session.take() {
+            // Parse session:window from the target
+            if let Some((session, window)) = target.split_once(':') {
+                tmux::resize_window(session, window, orig_w, orig_h);
+            }
         }
     }
 
@@ -162,6 +270,12 @@ impl App {
             None => 0,
         };
         self.list_state.select(Some(i));
+        self.panel_scroll = 0;
+        if self.panel_view == PanelView::GitHubPr
+            && let Some(ws) = self.selected()
+        {
+            self.github_content = format!("Press Tab to load PR for '{}'", ws.branch);
+        }
         self.update_preview();
     }
 
@@ -175,10 +289,65 @@ impl App {
             None => 0,
         };
         self.list_state.select(Some(i));
+        self.panel_scroll = 0;
+        if self.panel_view == PanelView::GitHubPr
+            && let Some(ws) = self.selected()
+        {
+            self.github_content = format!("Press Tab to load PR for '{}'", ws.branch);
+        }
         self.update_preview();
     }
 
-    fn handle_switch(&mut self) {
+    fn scroll_up(&mut self) {
+        self.panel_scroll = self.panel_scroll.saturating_sub(1);
+    }
+
+    fn scroll_down(&mut self) {
+        self.panel_scroll = self.panel_scroll.saturating_add(1);
+    }
+
+    fn toggle_panel(&mut self) {
+        self.panel_scroll = 0;
+        match self.panel_view {
+            PanelView::DefaultWindow => {
+                self.panel_view = PanelView::GitHubPr;
+                if let Some(ws) = self.selected() {
+                    if let Some(pr_num) = ws.pr_number {
+                        let repo_path = ws.repo_path.clone();
+                        match github::pr_view_full(&repo_path, pr_num) {
+                            Ok(content) => self.github_content = content,
+                            Err(e) => self.github_content = format!("Error fetching PR: {e}"),
+                        }
+                    } else {
+                        self.github_content = format!("No PR found for branch '{}'", ws.branch);
+                    }
+                } else {
+                    self.github_content = "(no workstream selected)".into();
+                }
+            }
+            PanelView::GitHubPr => {
+                self.panel_view = PanelView::DefaultWindow;
+                self.update_preview();
+            }
+        }
+    }
+
+    fn enter_interact(&mut self) {
+        if self.panel_view != PanelView::DefaultWindow {
+            return;
+        }
+        if let Some(ws) = self.selected() {
+            if !ws.active {
+                self.set_status("Cannot interact: session not active");
+                return;
+            }
+        } else {
+            return;
+        }
+        self.input_mode = InputMode::Interact;
+    }
+
+    fn handle_open(&mut self) {
         if let Some(ws) = self.selected() {
             let session = ws.session.clone();
             // If session isn't active, recreate it
@@ -194,8 +363,19 @@ impl App {
                     }
                 }
             }
+            // Restore pane size before attaching
+            self.restore_pane_size();
             self.should_switch = Some(session);
             self.should_quit = true;
+        }
+    }
+
+    fn send_key_to_tmux(&self, key_str: &str) {
+        if let Some(ws) = self.selected() {
+            let target = format!("{}:{}", ws.session, self.config.default_window);
+            let _ = Command::new("tmux")
+                .args(["send-keys", "-t", &target, key_str])
+                .output();
         }
     }
 
@@ -366,6 +546,31 @@ impl App {
     }
 }
 
+fn key_to_tmux_send(code: KeyCode, modifiers: KeyModifiers) -> Option<String> {
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        return match code {
+            KeyCode::Char(c) => Some(format!("C-{c}")),
+            _ => None,
+        };
+    }
+    match code {
+        KeyCode::Char(c) => Some(c.to_string()),
+        KeyCode::Enter => Some("Enter".into()),
+        KeyCode::Backspace => Some("BSpace".into()),
+        KeyCode::Tab => Some("Tab".into()),
+        KeyCode::Up => Some("Up".into()),
+        KeyCode::Down => Some("Down".into()),
+        KeyCode::Left => Some("Left".into()),
+        KeyCode::Right => Some("Right".into()),
+        KeyCode::Delete => Some("DC".into()),
+        KeyCode::Home => Some("Home".into()),
+        KeyCode::End => Some("End".into()),
+        KeyCode::PageUp => Some("PPage".into()),
+        KeyCode::PageDown => Some("NPage".into()),
+        _ => None,
+    }
+}
+
 pub fn run() -> Result<(), VexError> {
     let config = Config::load_or_create()?;
     let mut app = App::new(config);
@@ -384,6 +589,9 @@ pub fn run() -> Result<(), VexError> {
     let refresh_interval = Duration::from_secs(2);
 
     let result = run_loop(&mut terminal, &mut app, &mut last_refresh, refresh_interval);
+
+    // Restore pane size before exiting
+    app.restore_pane_size();
 
     // Restore terminal
     terminal::disable_raw_mode().ok();
@@ -415,8 +623,13 @@ fn run_loop(
             break;
         }
 
-        // Poll for events with timeout for periodic refresh
-        let timeout = Duration::from_millis(200);
+        // Shorter poll timeout in Interact mode for snappy display
+        let timeout = if app.input_mode == InputMode::Interact {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(200)
+        };
+
         if event::poll(timeout)
             .map_err(|e| VexError::ConfigError(format!("event poll error: {e}")))?
             && let Event::Key(key) = event::read()
@@ -426,22 +639,44 @@ fn run_loop(
                 continue;
             }
 
-            // Ctrl+C always quits
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            // Ctrl+C always quits (except in Interact mode where it's forwarded)
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('c')
+                && app.input_mode != InputMode::Interact
+            {
                 break;
             }
 
             match app.input_mode {
-                InputMode::Normal => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-                    KeyCode::Char('k') | KeyCode::Up => app.move_up(),
-                    KeyCode::Enter => app.handle_switch(),
-                    KeyCode::Char('n') => app.start_create(),
-                    KeyCode::Char('d') => app.start_delete(),
-                    KeyCode::Char('r') => app.start_rename(),
-                    _ => {}
-                },
+                InputMode::Normal => {
+                    // Check for Ctrl+O
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('o')
+                    {
+                        app.handle_open();
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('j') => app.move_down(),
+                            KeyCode::Char('k') => app.move_up(),
+                            KeyCode::Up => app.scroll_up(),
+                            KeyCode::Down => app.scroll_down(),
+                            KeyCode::Tab => app.toggle_panel(),
+                            KeyCode::Enter => app.enter_interact(),
+                            KeyCode::Char('n') => app.start_create(),
+                            KeyCode::Char('d') => app.start_delete(),
+                            KeyCode::Char('r') => app.start_rename(),
+                            _ => {}
+                        }
+                    }
+                }
+                InputMode::Interact => {
+                    if key.code == KeyCode::Esc {
+                        app.input_mode = InputMode::Normal;
+                    } else if let Some(tmux_key) = key_to_tmux_send(key.code, key.modifiers) {
+                        app.send_key_to_tmux(&tmux_key);
+                    }
+                }
                 InputMode::CreateNew => match key.code {
                     KeyCode::Enter => app.confirm_create(),
                     KeyCode::Esc => {
@@ -516,9 +751,11 @@ fn run_loop(
             }
         }
 
-        // Periodic refresh
-        if last_refresh.elapsed() >= refresh_interval {
-            app.refresh_workstreams();
+        // Periodic refresh (and always refresh preview in Interact mode)
+        if app.input_mode == InputMode::Interact || last_refresh.elapsed() >= refresh_interval {
+            if app.input_mode != InputMode::Interact {
+                app.refresh_workstreams();
+            }
             app.update_preview();
             *last_refresh = Instant::now();
         }
@@ -559,7 +796,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     if app.input_mode == InputMode::SelectBaseBranch {
         draw_branch_picker(f, app, content[1]);
     } else {
-        draw_preview(f, app, content[1]);
+        let preview_area = content[1];
+        draw_preview(f, app, preview_area);
     }
     draw_status(f, app, outer[2]);
     draw_help(f, app, outer[3]);
@@ -610,22 +848,67 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-fn draw_preview(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let title = match app.selected() {
-        Some(ws) => format!(" Preview - {} ", ws.session),
-        None => " Preview ".into(),
-    };
+fn draw_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    // Store inner area dimensions for pane resizing
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
+    app.preview_inner_size = (inner_w, inner_h);
 
-    let preview = Paragraph::new(Text::from(app.preview_content.as_str()))
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue)),
-        )
-        .wrap(Wrap { trim: false });
+    match app.panel_view {
+        PanelView::DefaultWindow => {
+            let title = match app.selected() {
+                Some(ws) => format!(" {} - {} ", app.config.default_window, ws.session),
+                None => " Preview ".into(),
+            };
+            let border_color = if app.input_mode == InputMode::Interact {
+                Color::Green
+            } else {
+                Color::Blue
+            };
 
-    f.render_widget(preview, area);
+            // Parse ANSI escape codes into styled Text
+            let text = app
+                .preview_content
+                .as_bytes()
+                .into_text()
+                .unwrap_or_else(|_| Text::from(app.preview_content.as_str()));
+
+            let preview = Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(border_color)),
+                )
+                .scroll((app.panel_scroll, 0));
+
+            f.render_widget(preview, area);
+        }
+        PanelView::GitHubPr => {
+            let title = match app.selected() {
+                Some(ws) => {
+                    if let Some(pr_num) = ws.pr_number {
+                        format!(" PR #{} - {} ", pr_num, ws.session)
+                    } else {
+                        format!(" GitHub - {} ", ws.session)
+                    }
+                }
+                None => " GitHub ".into(),
+            };
+
+            let preview = Paragraph::new(Text::from(app.github_content.as_str()))
+                .block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Blue)),
+                )
+                .wrap(Wrap { trim: false })
+                .scroll((app.panel_scroll, 0));
+
+            f.render_widget(preview, area);
+        }
+    }
 }
 
 fn draw_branch_picker(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -685,7 +968,7 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Red),
             ))
         }
-        InputMode::Normal => {
+        InputMode::Normal | InputMode::Interact => {
             if let Some((msg, _)) = &app.status_message {
                 Line::from(Span::styled(
                     msg.as_str(),
@@ -703,7 +986,10 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
 fn draw_help(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let help_text = match app.input_mode {
-        InputMode::Normal => "[Enter] Switch  [n] New  [d] Delete  [r] Rename  [q] Quit",
+        InputMode::Normal => {
+            "[Enter] Interact  [Tab] Toggle PR  [^O] Open  [j/k] Navigate  [n] New  [d] Del  [r] Rename  [q] Quit"
+        }
+        InputMode::Interact => "[Esc] Back  \u{2500}  Keystrokes forwarded to pane",
         InputMode::CreateNew | InputMode::Rename => "[Enter] Confirm  [Esc] Cancel",
         InputMode::SelectBaseBranch => {
             "[Enter] Select  [Up/Down] Navigate  [type] Filter  [Esc] Cancel"

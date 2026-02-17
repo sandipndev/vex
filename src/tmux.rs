@@ -127,8 +127,44 @@ pub fn attach(name: &str) -> Result<(), VexError> {
     Ok(())
 }
 
-pub fn capture_pane(session: &str, window: &str) -> String {
-    run_tmux(&["capture-pane", "-t", &format!("{session}:{window}"), "-p"]).unwrap_or_default()
+pub fn capture_pane_ansi(session: &str, window: &str) -> String {
+    run_tmux(&[
+        "capture-pane",
+        "-t",
+        &format!("{session}:{window}"),
+        "-e",
+        "-p",
+    ])
+    .unwrap_or_default()
+}
+
+pub fn window_size(session: &str, window: &str) -> Option<(u16, u16)> {
+    let target = format!("{session}:{window}");
+    let output = run_tmux(&[
+        "display-message",
+        "-t",
+        &target,
+        "-p",
+        "#{window_width}\t#{window_height}",
+    ])
+    .ok()?;
+    let mut parts = output.split('\t');
+    let w = parts.next()?.parse().ok()?;
+    let h = parts.next()?.parse().ok()?;
+    Some((w, h))
+}
+
+pub fn resize_window(session: &str, window: &str, width: u16, height: u16) {
+    let target = format!("{session}:{window}");
+    let _ = run_tmux(&[
+        "resize-window",
+        "-t",
+        &target,
+        "-x",
+        &width.to_string(),
+        "-y",
+        &height.to_string(),
+    ]);
 }
 
 pub fn kill_session(name: &str) -> Result<(), VexError> {

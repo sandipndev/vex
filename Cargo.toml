@@ -24,6 +24,7 @@ dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 ratatui = "0.29"
 crossterm = "0.28"
+ansi-to-tui = "7"
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
