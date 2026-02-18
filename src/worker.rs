@@ -144,6 +144,8 @@ impl Worker {
 }
 
 fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerResponse>) {
+    let cache = crate::cache::PrCache::open().ok();
+
     while let Ok(req) = rx.recv() {
         match req {
             WorkerRequest::Shutdown => break,
@@ -184,6 +186,9 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
                 let mut entries = Vec::new();
                 for path in &repo_paths {
                     if let Ok(prs) = github::list_prs(path) {
+                        if let Some(c) = &cache {
+                            c.set_pr_numbers(path, &prs);
+                        }
                         for (branch, num) in prs {
                             entries.push((format!("{path}/{branch}"), num));
                         }
@@ -196,33 +201,49 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
                 repo_path,
                 pr_number,
             } => {
-                let data = match github::pr_view_structured(&repo_path, pr_number) {
-                    Ok((view, checks)) => {
-                        match serde_json::to_string(&serde_json::json!({
-                            "title": view.title,
-                            "number": view.number,
-                            "body": view.body,
-                            "url": view.url,
-                            "state": view.state,
-                            "comments": view.comments.iter().map(|c| serde_json::json!({
-                                "author": c.author.login,
-                                "body": c.body,
-                            })).collect::<Vec<_>>(),
-                            "reviews": view.reviews.iter().map(|r| serde_json::json!({
-                                "author": r.author.login,
-                                "body": r.body,
-                                "state": r.state,
-                            })).collect::<Vec<_>>(),
-                            "checks_passed": checks.iter().filter(|c| c.conclusion == "SUCCESS" || c.conclusion == "success").count(),
-                            "checks_total": checks.len(),
-                        })) {
-                            Ok(json) => Ok(json),
-                            Err(e) => Err(format!("JSON serialization error: {e}")),
+                // Cache-first: check SQLite cache before calling gh
+                if let Some(cached) = cache
+                    .as_ref()
+                    .and_then(|c| c.get_pr_structured(&repo_path, pr_number))
+                {
+                    let _ = tx.send(WorkerResponse::PrStructuredFetched {
+                        pr_number,
+                        data: Ok(cached),
+                    });
+                } else {
+                    let data = match github::pr_view_structured(&repo_path, pr_number) {
+                        Ok((view, checks)) => {
+                            match serde_json::to_string(&serde_json::json!({
+                                "title": view.title,
+                                "number": view.number,
+                                "body": view.body,
+                                "url": view.url,
+                                "state": view.state,
+                                "comments": view.comments.iter().map(|c| serde_json::json!({
+                                    "author": c.author.login,
+                                    "body": c.body,
+                                })).collect::<Vec<_>>(),
+                                "reviews": view.reviews.iter().map(|r| serde_json::json!({
+                                    "author": r.author.login,
+                                    "body": r.body,
+                                    "state": r.state,
+                                })).collect::<Vec<_>>(),
+                                "checks_passed": checks.iter().filter(|c| c.conclusion == "SUCCESS" || c.conclusion == "success").count(),
+                                "checks_total": checks.len(),
+                            })) {
+                                Ok(json) => {
+                                    if let Some(c) = &cache {
+                                        c.set_pr_structured(&repo_path, pr_number, &json);
+                                    }
+                                    Ok(json)
+                                }
+                                Err(e) => Err(format!("JSON serialization error: {e}")),
+                            }
                         }
-                    }
-                    Err(e) => Err(format!("Error fetching PR: {e}")),
-                };
-                let _ = tx.send(WorkerResponse::PrStructuredFetched { pr_number, data });
+                        Err(e) => Err(format!("Error fetching PR: {e}")),
+                    };
+                    let _ = tx.send(WorkerResponse::PrStructuredFetched { pr_number, data });
+                }
             }
 
             WorkerRequest::ListBranches { repo_path } => {

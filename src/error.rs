@@ -32,6 +32,9 @@ pub enum VexError {
     #[error("YAML parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
+    #[error("Cache error: {0}")]
+    Cache(String),
+
     #[error("Could not determine home directory")]
     NoHomeDir,
 }
