@@ -63,8 +63,6 @@ pub struct PrViewJson {
 pub struct PrCommentJson {
     pub author: PrAuthor,
     pub body: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
 }
 
 #[derive(Deserialize)]
@@ -72,8 +70,6 @@ pub struct PrReviewJson {
     pub author: PrAuthor,
     pub body: String,
     pub state: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
 }
 
 #[derive(Deserialize)]

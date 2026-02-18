@@ -207,13 +207,11 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
                             "comments": view.comments.iter().map(|c| serde_json::json!({
                                 "author": c.author.login,
                                 "body": c.body,
-                                "created_at": c.created_at,
                             })).collect::<Vec<_>>(),
                             "reviews": view.reviews.iter().map(|r| serde_json::json!({
                                 "author": r.author.login,
                                 "body": r.body,
                                 "state": r.state,
-                                "created_at": r.created_at,
                             })).collect::<Vec<_>>(),
                             "checks_passed": checks.iter().filter(|c| c.conclusion == "SUCCESS" || c.conclusion == "success").count(),
                             "checks_total": checks.len(),
