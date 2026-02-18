@@ -128,7 +128,14 @@ pub fn attach(name: &str) -> Result<(), VexError> {
 }
 
 pub fn capture_pane_text(session: &str, window: &str) -> String {
-    run_tmux(&["capture-pane", "-t", &format!("{session}:{window}"), "-p"]).unwrap_or_default()
+    run_tmux(&[
+        "capture-pane",
+        "-t",
+        &format!("{session}:{window}"),
+        "-e",
+        "-p",
+    ])
+    .unwrap_or_default()
 }
 
 pub fn kill_session(name: &str) -> Result<(), VexError> {
