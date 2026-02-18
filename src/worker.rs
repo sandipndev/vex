@@ -174,7 +174,7 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
             }
 
             WorkerRequest::CapturePane { session, window } => {
-                let content = tmux::capture_pane_ansi(&session, &window);
+                let content = tmux::capture_pane_text(&session, &window);
                 let _ = tx.send(WorkerResponse::PaneCaptured {
                     session,
                     window,
