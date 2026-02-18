@@ -618,59 +618,6 @@ pub fn rename(
     Ok(())
 }
 
-pub fn checkout_pr(
-    repo_name: &str,
-    branch: &str,
-    pr_number: u64,
-    quiet: bool,
-) -> Result<String, VexError> {
-    let mut repo_meta = repo::resolve_repo(Some(repo_name))?;
-    let config = Config::load_or_create()?;
-
-    if repo_meta.has_workstream(branch) {
-        return Err(VexError::WorkstreamAlreadyExists {
-            repo: repo_meta.name.clone(),
-            branch: branch.into(),
-        });
-    }
-
-    // Set up worktree directory
-    let worktree_base = repo_worktree_dir(&repo_meta.name)?;
-    fs::create_dir_all(&worktree_base).map_err(|e| VexError::io(&worktree_base, e))?;
-    let worktree_path = worktree_base.join(branch);
-    let worktree_str = worktree_path.to_string_lossy().to_string();
-
-    // Create worktree tracking the remote branch
-    git::worktree_add_tracking(&repo_meta.path, &worktree_str, branch)?;
-
-    // Symlink configured files from source repo into worktree
-    create_symlinks(
-        &repo_meta.path,
-        &worktree_str,
-        &config.symlinks,
-        &repo_meta.symlinks,
-        quiet,
-    )?;
-
-    // Run on_create hooks in the worktree directory
-    if !config.hooks.on_create.is_empty() {
-        if !quiet {
-            println_info!("Running on_create hooks...");
-        }
-        run_hooks(&config.hooks.on_create, &worktree_str)?;
-    }
-
-    // Record workstream with PR number
-    repo_meta.add_workstream(branch, Some(pr_number));
-    repo_meta.save()?;
-
-    // Create tmux session
-    let session = tmux::session_name(&repo_meta.name, branch);
-    tmux::create_session(&session, &worktree_str, &config)?;
-
-    Ok(session)
-}
-
 pub fn exit() -> Result<(), VexError> {
     tmux::detach()
 }

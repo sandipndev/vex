@@ -121,24 +121,6 @@ pub fn fetch(repo_root: &str) -> Result<(), VexError> {
     Ok(())
 }
 
-pub fn worktree_add_tracking(
-    repo_root: &str,
-    worktree_path: &str,
-    branch: &str,
-) -> Result<(), VexError> {
-    // Try checking out existing remote-tracking branch directly
-    if run_git(&["worktree", "add", worktree_path, branch], Some(repo_root)).is_ok() {
-        return Ok(());
-    }
-    // Fallback: create local branch tracking origin/<branch>
-    let remote_ref = format!("origin/{branch}");
-    run_git(
-        &["worktree", "add", "-b", branch, worktree_path, &remote_ref],
-        Some(repo_root),
-    )?;
-    Ok(())
-}
-
 pub fn delete_branch(repo_root: &str, branch: &str) -> Result<(), VexError> {
     // Best-effort: don't fail if branch can't be deleted
     let _ = run_git(&["branch", "-D", branch], Some(repo_root));
