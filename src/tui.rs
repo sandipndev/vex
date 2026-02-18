@@ -3,6 +3,7 @@ use std::io;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use ansi_to_tui::IntoText as _;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
@@ -1216,14 +1217,19 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 Color::Blue
             };
 
-            let preview = Paragraph::new(Text::from(app.preview_content.as_str()))
+            let text = app
+                .preview_content
+                .as_bytes()
+                .into_text()
+                .unwrap_or_else(|_| Text::from(app.preview_content.as_str()));
+
+            let preview = Paragraph::new(text)
                 .block(
                     Block::default()
                         .title(title)
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(border_color)),
                 )
-                .wrap(Wrap { trim: false })
                 .scroll((app.panel_scroll, 0));
 
             f.render_widget(preview, area);
