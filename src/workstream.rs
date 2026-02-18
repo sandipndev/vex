@@ -77,6 +77,7 @@ fn create_symlinks(
     worktree_path: &str,
     global: &[String],
     per_repo: &[String],
+    quiet: bool,
 ) -> Result<(), VexError> {
     // Resolve effective list: start with global, apply per-repo overrides
     let mut effective: Vec<String> = global.to_vec();
@@ -114,7 +115,9 @@ fn create_symlinks(
         }
 
         std::os::unix::fs::symlink(&source, &target).map_err(|e| VexError::io(&target, e))?;
-        println_info!("Symlinked {file}");
+        if !quiet {
+            println_info!("Symlinked {file}");
+        }
     }
 
     Ok(())
@@ -142,11 +145,14 @@ pub fn create_no_attach(
     repo_name: Option<&str>,
     branch: &str,
     from: Option<&str>,
+    quiet: bool,
 ) -> Result<String, VexError> {
     let mut repo_meta = match repo::resolve_repo(repo_name) {
         Ok(meta) => meta,
         Err(VexError::RepoNotInitialized(_) | VexError::NotAGitRepo) if repo_name.is_none() => {
-            println_info!("Registering repo with vex...");
+            if !quiet {
+                println_info!("Registering repo with vex...");
+            }
             repo::init_repo()?
         }
         Err(e) => return Err(e),
@@ -173,8 +179,24 @@ pub fn create_no_attach(
     let worktree_str = worktree_path.to_string_lossy().to_string();
 
     // Create worktree off chosen base branch
-    println_info!("Creating new branch '{branch}' off '{base}'...");
+    if !quiet {
+        println_info!("Creating new branch '{branch}' off '{base}'...");
+    }
     git::worktree_add_new(&repo_meta.path, &worktree_str, branch, &base)?;
+
+    // Push branch and set up remote tracking (best-effort — skip if no remote)
+    match git::push_and_track(&worktree_str, branch) {
+        Ok(()) => {
+            if !quiet {
+                println_info!("Pushed branch and set upstream to origin/{branch}");
+            }
+        }
+        Err(_) => {
+            if !quiet {
+                println_info!("No remote 'origin' found — skipping upstream setup");
+            }
+        }
+    }
 
     // Symlink configured files from source repo into worktree
     create_symlinks(
@@ -182,11 +204,14 @@ pub fn create_no_attach(
         &worktree_str,
         &config.symlinks,
         &repo_meta.symlinks,
+        quiet,
     )?;
 
     // Run on_create hooks in the worktree directory
     if !config.hooks.on_create.is_empty() {
-        println_info!("Running on_create hooks...");
+        if !quiet {
+            println_info!("Running on_create hooks...");
+        }
         run_hooks(&config.hooks.on_create, &worktree_str)?;
     }
 
@@ -196,10 +221,14 @@ pub fn create_no_attach(
 
     // Create tmux session
     let session = tmux::session_name(&repo_meta.name, branch);
-    println_info!("Creating tmux session '{session}'...");
+    if !quiet {
+        println_info!("Creating tmux session '{session}'...");
+    }
     tmux::create_session(&session, &worktree_str, &config)?;
 
-    println_ok!("Workstream '{branch}' ready for repo '{}'", repo_meta.name);
+    if !quiet {
+        println_ok!("Workstream '{branch}' ready for repo '{}'", repo_meta.name);
+    }
 
     Ok(session)
 }
@@ -256,7 +285,7 @@ fn pick_branch_fzf(repo_path: &str, default_branch: &str) -> Result<String, VexE
 }
 
 pub fn create(repo_name: Option<&str>, branch: &str, from: Option<&str>) -> Result<(), VexError> {
-    let session = create_no_attach(repo_name, branch, from)?;
+    let session = create_no_attach(repo_name, branch, from, false)?;
     tmux::attach(&session)?;
     Ok(())
 }
@@ -398,7 +427,7 @@ fn pick_workstream_fzf(repo_name: Option<&str>) -> Result<(String, String), VexE
     Ok((repo.clone(), branch.clone()))
 }
 
-pub fn remove(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
+pub fn remove(repo_name: Option<&str>, branch: &str, quiet: bool) -> Result<(), VexError> {
     let mut repo_meta = repo::resolve_repo(repo_name)?;
 
     if !repo_meta.has_workstream(branch) {
@@ -426,10 +455,12 @@ pub fn remove(repo_name: Option<&str>, branch: &str) -> Result<(), VexError> {
     repo_meta.remove_workstream(branch);
     repo_meta.save()?;
 
-    println_ok!(
-        "Removed workstream '{branch}' from repo '{}'",
-        repo_meta.name
-    );
+    if !quiet {
+        println_ok!(
+            "Removed workstream '{branch}' from repo '{}'",
+            repo_meta.name
+        );
+    }
     Ok(())
 }
 
@@ -522,6 +553,7 @@ pub fn rename(
     repo_name: Option<&str>,
     old_branch: Option<&str>,
     new_branch: &str,
+    quiet: bool,
 ) -> Result<(), VexError> {
     let (mut repo_meta, old_branch) = detect_workstream(repo_name, old_branch)?;
 
@@ -537,7 +569,9 @@ pub fn rename(
     let had_session = tmux::session_exists(&old_session);
 
     // Rename git branch (most likely to fail — do first)
-    println_info!("Renaming branch '{old_branch}' -> '{new_branch}'...");
+    if !quiet {
+        println_info!("Renaming branch '{old_branch}' -> '{new_branch}'...");
+    }
     git::rename_branch(&repo_meta.path, &old_branch, new_branch)?;
 
     // Move worktree directory
@@ -547,14 +581,18 @@ pub fn rename(
     if old_worktree.exists() {
         let old_str = old_worktree.to_string_lossy().to_string();
         let new_str = new_worktree.to_string_lossy().to_string();
-        println_info!("Moving worktree...");
+        if !quiet {
+            println_info!("Moving worktree...");
+        }
         git::worktree_move(&repo_meta.path, &old_str, &new_str)?;
     }
 
     // Kill old tmux session and recreate with new path
     let new_session = tmux::session_name(&repo_meta.name, new_branch);
     if had_session {
-        println_info!("Recreating tmux session...");
+        if !quiet {
+            println_info!("Recreating tmux session...");
+        }
         let _ = tmux::kill_session(&old_session);
         let config = Config::load_or_create()?;
         let new_dir = new_worktree.to_string_lossy().to_string();
@@ -565,17 +603,72 @@ pub fn rename(
     repo_meta.rename_workstream(&old_branch, new_branch);
     repo_meta.save()?;
 
-    println_ok!(
-        "Renamed workstream '{old_branch}' -> '{new_branch}' in repo '{}'",
-        repo_meta.name
-    );
+    if !quiet {
+        println_ok!(
+            "Renamed workstream '{old_branch}' -> '{new_branch}' in repo '{}'",
+            repo_meta.name
+        );
+    }
 
     // If we were in the old session, attach to the new one
-    if had_session {
+    if had_session && !quiet {
         tmux::attach(&new_session)?;
     }
 
     Ok(())
+}
+
+pub fn checkout_pr(
+    repo_name: &str,
+    branch: &str,
+    pr_number: u64,
+    quiet: bool,
+) -> Result<String, VexError> {
+    let mut repo_meta = repo::resolve_repo(Some(repo_name))?;
+    let config = Config::load_or_create()?;
+
+    if repo_meta.has_workstream(branch) {
+        return Err(VexError::WorkstreamAlreadyExists {
+            repo: repo_meta.name.clone(),
+            branch: branch.into(),
+        });
+    }
+
+    // Set up worktree directory
+    let worktree_base = repo_worktree_dir(&repo_meta.name)?;
+    fs::create_dir_all(&worktree_base).map_err(|e| VexError::io(&worktree_base, e))?;
+    let worktree_path = worktree_base.join(branch);
+    let worktree_str = worktree_path.to_string_lossy().to_string();
+
+    // Create worktree tracking the remote branch
+    git::worktree_add_tracking(&repo_meta.path, &worktree_str, branch)?;
+
+    // Symlink configured files from source repo into worktree
+    create_symlinks(
+        &repo_meta.path,
+        &worktree_str,
+        &config.symlinks,
+        &repo_meta.symlinks,
+        quiet,
+    )?;
+
+    // Run on_create hooks in the worktree directory
+    if !config.hooks.on_create.is_empty() {
+        if !quiet {
+            println_info!("Running on_create hooks...");
+        }
+        run_hooks(&config.hooks.on_create, &worktree_str)?;
+    }
+
+    // Record workstream with PR number
+    repo_meta.add_workstream(branch, Some(pr_number));
+    repo_meta.save()?;
+
+    // Create tmux session
+    let session = tmux::session_name(&repo_meta.name, branch);
+    tmux::create_session(&session, &worktree_str, &config)?;
+
+    Ok(session)
 }
 
 pub fn exit() -> Result<(), VexError> {

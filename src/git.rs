@@ -72,6 +72,11 @@ pub fn worktree_add_new(
     Ok(())
 }
 
+pub fn push_and_track(worktree_path: &str, branch: &str) -> Result<(), VexError> {
+    run_git(&["push", "-u", "origin", branch], Some(worktree_path))?;
+    Ok(())
+}
+
 pub fn worktree_remove(repo_root: &str, worktree_path: &str) -> Result<(), VexError> {
     run_git(
         &["worktree", "remove", "--force", worktree_path],
@@ -109,6 +114,29 @@ pub fn list_branches(repo_root: &str) -> Result<Vec<String>, VexError> {
         .filter(|l| !l.is_empty() && *l != "origin/HEAD")
         .map(|l| l.to_string())
         .collect())
+}
+
+pub fn fetch(repo_root: &str) -> Result<(), VexError> {
+    run_git(&["fetch", "--prune"], Some(repo_root))?;
+    Ok(())
+}
+
+pub fn worktree_add_tracking(
+    repo_root: &str,
+    worktree_path: &str,
+    branch: &str,
+) -> Result<(), VexError> {
+    // Try checking out existing remote-tracking branch directly
+    if run_git(&["worktree", "add", worktree_path, branch], Some(repo_root)).is_ok() {
+        return Ok(());
+    }
+    // Fallback: create local branch tracking origin/<branch>
+    let remote_ref = format!("origin/{branch}");
+    run_git(
+        &["worktree", "add", "-b", branch, worktree_path, &remote_ref],
+        Some(repo_root),
+    )?;
+    Ok(())
 }
 
 pub fn delete_branch(repo_root: &str, branch: &str) -> Result<(), VexError> {
