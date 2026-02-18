@@ -40,6 +40,12 @@ enum FocusPane {
     Right,
 }
 
+#[derive(PartialEq, Clone)]
+enum RightSection {
+    GitHub,
+    Preview,
+}
+
 enum ListRow {
     RepoHeader { repo_name: String },
     Workstream { index: usize },
@@ -61,6 +67,8 @@ struct GithubPrData {
 enum InputMode {
     Normal,
     Interact,
+    ReviewBrowser,
+    PreviewScroll,
     CreateNew,
     SelectBaseBranch,
     Rename,
@@ -106,10 +114,11 @@ struct App {
     branch_list_state: ListState,
     // Focus and scroll
     focus: FocusPane,
+    right_section: RightSection,
     github_pr_data: Option<GithubPrData>,
-    github_expanded: bool,
     github_scroll: u16,
     tmux_scroll: u16,
+    review_browser_index: usize,
     // Grouped list
     visible_rows: Vec<ListRow>,
     // Help overlay
@@ -148,10 +157,11 @@ impl App {
             branch_filter: String::new(),
             branch_list_state: ListState::default(),
             focus: FocusPane::Left,
+            right_section: RightSection::GitHub,
             github_pr_data: None,
-            github_expanded: false,
             github_scroll: 0,
             tmux_scroll: 0,
+            review_browser_index: 0,
             visible_rows: Vec::new(),
             show_help: false,
             pr_cache: HashMap::new(),
@@ -561,6 +571,14 @@ impl App {
         }
     }
 
+    /// Count of combined reviews + comments for the review browser.
+    fn review_browser_items_count(&self) -> usize {
+        self.github_pr_data
+            .as_ref()
+            .map(|pr| pr.reviews.len() + pr.comments.len())
+            .unwrap_or(0)
+    }
+
     fn enter_interact(&mut self) {
         if let Some(ws) = self.selected() {
             if !ws.active {
@@ -951,47 +969,78 @@ fn run_loop(
                         }
                     } else {
                         // Right pane focused
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            if let KeyCode::Char('o') = key.code {
-                                app.enter_interact();
+                        match key.code {
+                            KeyCode::Up => {
+                                app.right_section = RightSection::GitHub;
                             }
-                        } else {
-                            match key.code {
-                                KeyCode::Up => {
-                                    if app.github_expanded {
-                                        app.github_scroll = app.github_scroll.saturating_sub(1);
-                                    } else {
-                                        app.tmux_scroll = app.tmux_scroll.saturating_sub(1);
-                                    }
-                                }
-                                KeyCode::Down => {
-                                    if app.github_expanded {
-                                        app.github_scroll = app.github_scroll.saturating_add(1);
-                                    } else {
-                                        app.tmux_scroll = app.tmux_scroll.saturating_add(1);
-                                    }
-                                }
-                                KeyCode::Enter => {
-                                    app.github_expanded = !app.github_expanded;
-                                    app.github_scroll = 0;
-                                }
-                                KeyCode::Left | KeyCode::Esc => {
-                                    app.focus = FocusPane::Left;
-                                }
-                                KeyCode::Char('q') => break,
-                                _ => {}
+                            KeyCode::Down => {
+                                app.right_section = RightSection::Preview;
                             }
+                            KeyCode::Enter => match app.right_section {
+                                RightSection::GitHub => {
+                                    app.review_browser_index = 0;
+                                    app.input_mode = InputMode::ReviewBrowser;
+                                }
+                                RightSection::Preview => {
+                                    // Enter PreviewScroll — initialize scroll to bottom
+                                    let total = app.preview_content.lines().count() as u16;
+                                    // Approximate visible height (will be clamped during draw)
+                                    app.tmux_scroll = total;
+                                    app.input_mode = InputMode::PreviewScroll;
+                                }
+                            },
+                            KeyCode::Left | KeyCode::Esc => {
+                                app.focus = FocusPane::Left;
+                            }
+                            KeyCode::Char('q') => break,
+                            _ => {}
                         }
                     }
                 }
                 InputMode::Interact => {
                     if key.code == KeyCode::Esc {
                         app.input_mode = InputMode::Normal;
-                        app.focus = FocusPane::Left;
+                        app.focus = FocusPane::Right;
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('o')
+                    {
+                        app.handle_open();
                     } else if let Some(tmux_key) = key_to_tmux_send(key.code, key.modifiers) {
                         app.send_key_to_tmux(&tmux_key);
                     }
                 }
+                InputMode::PreviewScroll => match key.code {
+                    KeyCode::Up => {
+                        app.tmux_scroll = app.tmux_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        app.tmux_scroll = app.tmux_scroll.saturating_add(1);
+                    }
+                    KeyCode::Enter => {
+                        app.enter_interact();
+                    }
+                    KeyCode::Esc => {
+                        app.input_mode = InputMode::Normal;
+                        app.focus = FocusPane::Right;
+                    }
+                    _ => {}
+                },
+                InputMode::ReviewBrowser => match key.code {
+                    KeyCode::Up => {
+                        app.review_browser_index = app.review_browser_index.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        let max = app.review_browser_items_count().saturating_sub(1);
+                        if app.review_browser_index < max {
+                            app.review_browser_index += 1;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.input_mode = InputMode::Normal;
+                        app.focus = FocusPane::Right;
+                    }
+                    _ => {}
+                },
                 InputMode::CreateNew => match key.code {
                     KeyCode::Enter => app.confirm_create(),
                     KeyCode::Esc => {
@@ -1227,28 +1276,24 @@ fn draw_grouped_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_right_panel(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    if app.github_expanded {
-        // Expanded: GitHub section takes 70%, tmux 30%
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(area);
-        draw_github_section(f, app, chunks[0], true);
-        draw_tmux_preview(f, app, chunks[1]);
-    } else {
-        // Compact: GitHub section 8 lines, rest is tmux
-        let gh_height = 8u16.min(area.height.saturating_sub(4));
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(gh_height), Constraint::Min(3)])
-            .split(area);
-        draw_github_section(f, app, chunks[0], false);
-        draw_tmux_preview(f, app, chunks[1]);
+    if app.input_mode == InputMode::ReviewBrowser {
+        draw_review_browser(f, app, area);
+        return;
     }
+
+    // Compact: GitHub section 8 lines, rest is tmux
+    let gh_height = 8u16.min(area.height.saturating_sub(4));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(gh_height), Constraint::Min(3)])
+        .split(area);
+    draw_github_section(f, app, chunks[0]);
+    draw_tmux_preview(f, app, chunks[1]);
 }
 
-fn draw_github_section(f: &mut ratatui::Frame, app: &App, area: Rect, expanded: bool) {
-    let border_color = if app.focus == FocusPane::Right {
+fn draw_github_section(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let border_color = if app.focus == FocusPane::Right && app.right_section == RightSection::GitHub
+    {
         Color::Cyan
     } else {
         Color::Blue
@@ -1295,87 +1340,13 @@ fn draw_github_section(f: &mut ratatui::Frame, app: &App, area: Rect, expanded: 
         Span::styled(format!(" {}", pr.state), Style::default().fg(state_color)),
     ]));
 
-    if expanded {
-        // Full description
-        if !pr.body.is_empty() {
-            lines.push(Line::from(""));
-            for desc_line in pr.body.lines().take(20) {
-                lines.push(Line::from(Span::styled(
-                    desc_line,
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-        }
-
-        // Reviews
-        for (author, body, state) in &pr.reviews {
-            if body.is_empty() && !matches!(state.as_str(), "CHANGES_REQUESTED" | "COMMENTED") {
-                continue;
-            }
-            lines.push(Line::from(""));
-            let state_indicator = match state.as_str() {
-                "APPROVED" => " [APPROVED]",
-                "CHANGES_REQUESTED" => " [CHANGES REQUESTED]",
-                "COMMENTED" => " [COMMENT]",
-                _ => "",
-            };
-            let state_color = match state.as_str() {
-                "APPROVED" => Color::Green,
-                "CHANGES_REQUESTED" => Color::Red,
-                _ => Color::Yellow,
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" @{author}"),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(state_indicator, Style::default().fg(state_color)),
-            ]));
-            if !body.is_empty() {
-                for review_line in body.lines().take(10) {
-                    lines.push(Line::from(Span::styled(
-                        format!(" {review_line}"),
-                        Style::default().fg(Color::Gray),
-                    )));
-                }
-            }
+    // Compact: first 2 lines of body
+    if !pr.body.is_empty() {
+        for desc_line in pr.body.lines().take(2) {
             lines.push(Line::from(Span::styled(
-                " ───────────────────────────────",
-                Style::default().fg(Color::DarkGray),
+                desc_line,
+                Style::default().fg(Color::Gray),
             )));
-        }
-
-        // Comments
-        for (author, body) in &pr.comments {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!(" @{author}"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for comment_line in body.lines().take(10) {
-                lines.push(Line::from(Span::styled(
-                    format!(" {comment_line}"),
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                " ───────────────────────────────",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    } else {
-        // Compact: first 2 lines of body
-        if !pr.body.is_empty() {
-            for desc_line in pr.body.lines().take(2) {
-                lines.push(Line::from(Span::styled(
-                    desc_line,
-                    Style::default().fg(Color::Gray),
-                )));
-            }
         }
     }
 
@@ -1422,7 +1393,9 @@ fn draw_tmux_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     };
     let border_color = if app.input_mode == InputMode::Interact {
         Color::Green
-    } else if app.focus == FocusPane::Right {
+    } else if app.input_mode == InputMode::PreviewScroll {
+        Color::Yellow
+    } else if app.focus == FocusPane::Right && app.right_section == RightSection::Preview {
         Color::Cyan
     } else {
         Color::Blue
@@ -1434,6 +1407,20 @@ fn draw_tmux_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .into_text()
         .unwrap_or_else(|_| Text::from(app.preview_content.as_str()));
 
+    // Auto-scroll to bottom when not in manual scroll mode
+    let total_lines = text.lines.len() as u16;
+    let visible_height = area.height.saturating_sub(2); // account for borders
+    let scroll =
+        if app.input_mode == InputMode::PreviewScroll || app.input_mode == InputMode::Interact {
+            // Manual scroll mode — clamp to valid range
+            let max_scroll = total_lines.saturating_sub(visible_height);
+            app.tmux_scroll = app.tmux_scroll.min(max_scroll);
+            app.tmux_scroll
+        } else {
+            // Auto-scroll to bottom
+            total_lines.saturating_sub(visible_height)
+        };
+
     let preview = Paragraph::new(text)
         .block(
             Block::default()
@@ -1441,9 +1428,95 @@ fn draw_tmux_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color)),
         )
-        .scroll((app.tmux_scroll, 0));
+        .scroll((scroll, 0));
 
     f.render_widget(preview, area);
+}
+
+fn draw_review_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some(pr) = &app.github_pr_data else {
+        let block = Block::default()
+            .title(" Review Browser ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+        let para = Paragraph::new(Span::styled(
+            "(no PR data)",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block);
+        f.render_widget(Clear, area);
+        f.render_widget(para, area);
+        return;
+    };
+
+    // Build combined list: reviews first, then comments
+    let mut items: Vec<(&str, &str, &str)> = Vec::new(); // (kind, header, body)
+    // We'll build lines for the selected item
+    let mut all_headers: Vec<String> = Vec::new();
+    for (author, body, state) in &pr.reviews {
+        let state_indicator = match state.as_str() {
+            "APPROVED" => " [APPROVED]",
+            "CHANGES_REQUESTED" => " [CHANGES REQUESTED]",
+            "COMMENTED" => " [COMMENT]",
+            "DISMISSED" => " [DISMISSED]",
+            _ => "",
+        };
+        all_headers.push(format!("Review: @{author}{state_indicator}"));
+        items.push(("review", body, state));
+    }
+    for (author, body) in &pr.comments {
+        all_headers.push(format!("Comment: @{author}"));
+        items.push(("comment", body, ""));
+    }
+
+    let total = items.len();
+    if total == 0 {
+        let block = Block::default()
+            .title(" Review Browser ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+        let para = Paragraph::new(Span::styled(
+            "(no reviews or comments)",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block);
+        f.render_widget(Clear, area);
+        f.render_widget(para, area);
+        return;
+    }
+
+    let idx = app.review_browser_index.min(total - 1);
+    let header = &all_headers[idx];
+    let body = items[idx].1;
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for line in body.lines() {
+        lines.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(Color::White),
+        )));
+    }
+
+    let title = format!(" {}/{} ", idx + 1, total);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    f.render_widget(Clear, area);
+
+    let para = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(para, area);
 }
 
 fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
@@ -1472,15 +1545,24 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  q / Esc     Quit"),
         Line::from(""),
         Line::from(Span::styled(
-            " Right pane (preview):",
+            " Right pane:",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  Up/Down     Scroll content"),
-        Line::from("  Enter       Toggle GitHub expand/collapse"),
-        Line::from("  Ctrl+O      Interact mode (keys to tmux)"),
+        Line::from("  Up/Down     Select GitHub / Preview section"),
+        Line::from("  Enter       Open section (review browser / scroll)"),
         Line::from("  Left / Esc  Back to left pane"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Preview scroll mode:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Up/Down     Scroll preview"),
+        Line::from("  Enter       Interact mode (keys to tmux)"),
+        Line::from("  Esc         Back to right pane"),
         Line::from(""),
         Line::from(Span::styled(
             " Interact mode:",
@@ -1488,8 +1570,18 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  Esc         Exit interact mode"),
+        Line::from("  Ctrl+O      Open workstream (switch to tmux)"),
+        Line::from("  Esc         Back to right pane"),
         Line::from("  (all keys)  Forwarded to tmux pane"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Review browser:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Up/Down     Navigate reviews/comments"),
+        Line::from("  Esc         Back to right pane"),
         Line::from(""),
         Line::from(Span::styled(
             " Press any key to dismiss ",
@@ -1591,6 +1683,14 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Line::from("")
             }
         }
+        InputMode::PreviewScroll => Line::from(Span::styled(
+            "SCROLL: Up/Down scroll | Enter: interact | Esc: back",
+            Style::default().fg(Color::DarkGray),
+        )),
+        InputMode::ReviewBrowser => Line::from(Span::styled(
+            "REVIEW: Up/Down navigate | Esc: back",
+            Style::default().fg(Color::DarkGray),
+        )),
     };
 
     let status = Paragraph::new(content);
