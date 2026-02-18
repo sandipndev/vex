@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use serde::Deserialize;
+
 use crate::error::VexError;
 
 /// Returns a list of (branch_name, pr_number) for open PRs in the repo.
@@ -42,95 +44,101 @@ pub fn list_prs(repo_path: &str) -> Result<Vec<(String, u64)>, VexError> {
     Ok(results)
 }
 
-#[derive(Debug, Clone)]
-pub struct PrListEntry {
-    pub number: u64,
+// --- Structured JSON-based PR data ---
+
+#[derive(Deserialize)]
+pub struct PrViewJson {
     pub title: String,
-    pub head_ref: String,
-    pub author: String,
+    pub number: u64,
+    pub body: String,
+    pub url: String,
+    pub state: String,
+    #[serde(default)]
+    pub comments: Vec<PrCommentJson>,
+    #[serde(default)]
+    pub reviews: Vec<PrReviewJson>,
 }
 
-/// Returns a detailed list of open PRs (number, title, branch, author).
-/// Returns Ok(vec![]) if `gh` is unavailable or the repo isn't on GitHub.
-pub fn list_prs_detailed(repo_path: &str) -> Result<Vec<PrListEntry>, VexError> {
+#[derive(Deserialize)]
+pub struct PrCommentJson {
+    pub author: PrAuthor,
+    pub body: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct PrReviewJson {
+    pub author: PrAuthor,
+    pub body: String,
+    pub state: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct PrAuthor {
+    pub login: String,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+pub struct PrCheckJson {
+    pub name: String,
+    pub state: String,
+    pub conclusion: String,
+}
+
+/// Fetch structured PR data via `gh pr view --json`.
+pub fn pr_view_json(repo_path: &str, pr_number: u64) -> Result<PrViewJson, VexError> {
+    let num_str = pr_number.to_string();
     let output = Command::new("gh")
         .args([
             "pr",
-            "list",
+            "view",
+            &num_str,
             "--json",
-            "number,title,headRefName,author",
-            "--jq",
-            r#".[] | "\(.number)\t\(.headRefName)\t\(.author.login)\t\(.title)""#,
+            "title,number,body,url,state,comments,reviews",
         ])
         .current_dir(repo_path)
-        .output();
-
-    let output = match output {
-        Ok(o) => o,
-        Err(_) => return Ok(vec![]),
-    };
+        .output()
+        .map_err(|e| VexError::GitError(format!("failed to run gh: {e}")))?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VexError::GitError(format!("gh pr view failed: {stderr}")));
+    }
+
+    let json = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&json)
+        .map_err(|e| VexError::GitError(format!("failed to parse PR JSON: {e}")))
+}
+
+/// Fetch PR checks via `gh pr checks --json`.
+pub fn pr_checks_json(repo_path: &str, pr_number: u64) -> Result<Vec<PrCheckJson>, VexError> {
+    let num_str = pr_number.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "checks", &num_str, "--json", "name,state,conclusion"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| VexError::GitError(format!("failed to run gh: {e}")))?;
+
+    if !output.status.success() {
+        // Checks may not be available — return empty
         return Ok(vec![]);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut results = Vec::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(4, '\t').collect();
-        if parts.len() == 4
-            && let Ok(number) = parts[0].parse::<u64>()
-        {
-            results.push(PrListEntry {
-                number,
-                head_ref: parts[1].to_string(),
-                author: parts[2].to_string(),
-                title: parts[3].to_string(),
-            });
-        }
-    }
-    Ok(results)
+    let json = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&json)
+        .map_err(|e| VexError::GitError(format!("failed to parse checks JSON: {e}")))
 }
 
-/// Returns the full PR view (body + checks) for a given PR number.
-/// Gracefully handles partial failures.
-pub fn pr_view_full(repo_path: &str, pr_number: u64) -> Result<String, VexError> {
-    let num_str = pr_number.to_string();
-    let mut sections = Vec::new();
-
-    // PR view with comments
-    if let Ok(output) = Command::new("gh")
-        .args(["pr", "view", &num_str, "--comments"])
-        .current_dir(repo_path)
-        .output()
-        && output.status.success()
-    {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !text.is_empty() {
-            sections.push(text);
-        }
-    }
-
-    // PR checks
-    if let Ok(output) = Command::new("gh")
-        .args(["pr", "checks", &num_str])
-        .current_dir(repo_path)
-        .output()
-        && output.status.success()
-    {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !text.is_empty() {
-            sections.push(format!("─── Checks ───\n\n{text}"));
-        }
-    }
-
-    if sections.is_empty() {
-        Ok(format!("Could not fetch PR #{pr_number} details"))
-    } else {
-        Ok(sections.join("\n\n"))
-    }
+/// Combined structured PR fetch: view + checks.
+pub fn pr_view_structured(
+    repo_path: &str,
+    pr_number: u64,
+) -> Result<(PrViewJson, Vec<PrCheckJson>), VexError> {
+    let view = pr_view_json(repo_path, pr_number)?;
+    let checks = pr_checks_json(repo_path, pr_number).unwrap_or_default();
+    Ok((view, checks))
 }

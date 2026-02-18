@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::sync::mpsc;
 use std::thread;
 
+use chrono::{DateTime, Utc};
+
 use crate::github;
 use crate::repo;
 use crate::tmux;
@@ -13,16 +15,17 @@ pub struct WorkstreamData {
     pub session: String,
     pub active: bool,
     pub repo_path: String,
+    pub last_accessed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 pub enum WorkerRequest {
     RefreshWorkstreams,
     CapturePane { session: String, window: String },
     LoadPrCache { repo_paths: Vec<String> },
-    FetchPrDetails { repo_path: String, pr_number: u64 },
+    FetchPrStructured { repo_path: String, pr_number: u64 },
     ListBranches { repo_path: String },
     GitFetch { repo_paths: Vec<String> },
-    ListPrs { repo_path: String },
     Shutdown,
 }
 
@@ -38,18 +41,14 @@ pub enum WorkerResponse {
     PrCacheLoaded {
         entries: Vec<(String, u64)>,
     },
-    PrDetailsFetched {
+    PrStructuredFetched {
         pr_number: u64,
-        content: String,
+        data: Result<String, String>,
     },
     BranchesListed {
         branches: Vec<String>,
     },
     GitFetchCompleted,
-    PrsListed {
-        repo_path: String,
-        prs: Vec<github::PrListEntry>,
-    },
 }
 
 /// Coarsened key for deduplication — ignores volatile params.
@@ -58,10 +57,9 @@ enum RequestKey {
     RefreshWorkstreams,
     CapturePane,
     LoadPrCache,
-    FetchPrDetails,
+    FetchPrStructured,
     ListBranches,
     GitFetch,
-    ListPrs,
 }
 
 impl WorkerRequest {
@@ -70,10 +68,9 @@ impl WorkerRequest {
             WorkerRequest::RefreshWorkstreams => Some(RequestKey::RefreshWorkstreams),
             WorkerRequest::CapturePane { .. } => Some(RequestKey::CapturePane),
             WorkerRequest::LoadPrCache { .. } => Some(RequestKey::LoadPrCache),
-            WorkerRequest::FetchPrDetails { .. } => Some(RequestKey::FetchPrDetails),
+            WorkerRequest::FetchPrStructured { .. } => Some(RequestKey::FetchPrStructured),
             WorkerRequest::ListBranches { .. } => Some(RequestKey::ListBranches),
             WorkerRequest::GitFetch { .. } => Some(RequestKey::GitFetch),
-            WorkerRequest::ListPrs { .. } => Some(RequestKey::ListPrs),
             WorkerRequest::Shutdown => None,
         }
     }
@@ -85,10 +82,9 @@ impl WorkerResponse {
             WorkerResponse::WorkstreamsRefreshed { .. } => RequestKey::RefreshWorkstreams,
             WorkerResponse::PaneCaptured { .. } => RequestKey::CapturePane,
             WorkerResponse::PrCacheLoaded { .. } => RequestKey::LoadPrCache,
-            WorkerResponse::PrDetailsFetched { .. } => RequestKey::FetchPrDetails,
+            WorkerResponse::PrStructuredFetched { .. } => RequestKey::FetchPrStructured,
             WorkerResponse::BranchesListed { .. } => RequestKey::ListBranches,
             WorkerResponse::GitFetchCompleted => RequestKey::GitFetch,
-            WorkerResponse::PrsListed { .. } => RequestKey::ListPrs,
         }
     }
 }
@@ -167,6 +163,8 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
                             session,
                             active,
                             repo_path: repo_meta.path.clone(),
+                            last_accessed_at: ws.last_accessed_at,
+                            created_at: ws.created_at,
                         });
                     }
                 }
@@ -194,15 +192,39 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
                 let _ = tx.send(WorkerResponse::PrCacheLoaded { entries });
             }
 
-            WorkerRequest::FetchPrDetails {
+            WorkerRequest::FetchPrStructured {
                 repo_path,
                 pr_number,
             } => {
-                let content = match github::pr_view_full(&repo_path, pr_number) {
-                    Ok(c) => c,
-                    Err(e) => format!("Error fetching PR: {e}"),
+                let data = match github::pr_view_structured(&repo_path, pr_number) {
+                    Ok((view, checks)) => {
+                        match serde_json::to_string(&serde_json::json!({
+                            "title": view.title,
+                            "number": view.number,
+                            "body": view.body,
+                            "url": view.url,
+                            "state": view.state,
+                            "comments": view.comments.iter().map(|c| serde_json::json!({
+                                "author": c.author.login,
+                                "body": c.body,
+                                "created_at": c.created_at,
+                            })).collect::<Vec<_>>(),
+                            "reviews": view.reviews.iter().map(|r| serde_json::json!({
+                                "author": r.author.login,
+                                "body": r.body,
+                                "state": r.state,
+                                "created_at": r.created_at,
+                            })).collect::<Vec<_>>(),
+                            "checks_passed": checks.iter().filter(|c| c.conclusion == "SUCCESS" || c.conclusion == "success").count(),
+                            "checks_total": checks.len(),
+                        })) {
+                            Ok(json) => Ok(json),
+                            Err(e) => Err(format!("JSON serialization error: {e}")),
+                        }
+                    }
+                    Err(e) => Err(format!("Error fetching PR: {e}")),
                 };
-                let _ = tx.send(WorkerResponse::PrDetailsFetched { pr_number, content });
+                let _ = tx.send(WorkerResponse::PrStructuredFetched { pr_number, data });
             }
 
             WorkerRequest::ListBranches { repo_path } => {
@@ -215,11 +237,6 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
                     let _ = crate::git::fetch(path);
                 }
                 let _ = tx.send(WorkerResponse::GitFetchCompleted);
-            }
-
-            WorkerRequest::ListPrs { repo_path } => {
-                let prs = github::list_prs_detailed(&repo_path).unwrap_or_default();
-                let _ = tx.send(WorkerResponse::PrsListed { repo_path, prs });
             }
         }
     }
