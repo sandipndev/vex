@@ -6,6 +6,7 @@ mod github;
 mod repo;
 mod tmux;
 mod tui;
+mod worker;
 mod workstream;
 
 use clap::{CommandFactory, Parser};
