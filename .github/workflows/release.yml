@@ -15,13 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      - name: Extract version
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read version from meta/release branch
         id: version
         run: |
-          raw=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          version="${raw%-dev}"
+          git fetch origin meta/release
+          version=$(git show origin/meta/release:VERSION | tr -d '[:space:]')
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Releasing v${version}"
 
@@ -30,14 +32,14 @@ jobs:
           sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
           cargo update --workspace
 
-      - name: Commit release version
+      - name: Create tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
           git commit -m "ci(release): release v${{ steps.version.outputs.version }}"
           git tag "v${{ steps.version.outputs.version }}"
-          git push origin main --tags
+          git push origin "v${{ steps.version.outputs.version }}"
 
   build:
     name: Build ${{ matrix.target }}
@@ -135,29 +137,25 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish
 
-  set-dev-version:
-    name: Bump to next dev version
+  bump-version:
+    name: Bump version on meta/release
     needs: [release, publish-crate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: meta/release
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Bump to next dev version
+      - name: Bump patch version
         run: |
           version="${{ needs.release.outputs.version }}"
-          # Bump patch: 0.2.1 -> 0.2.2-dev
           IFS='.' read -r major minor patch <<< "$version"
           next_patch=$((patch + 1))
-          dev_version="${major}.${minor}.${next_patch}-dev"
-          sed -i "s/^version = .*/version = \"${dev_version}\"/" Cargo.toml
-          cargo update --workspace
+          next_version="${major}.${minor}.${next_patch}"
+          echo "$next_version" > VERSION
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-          git commit -m "ci(dev): bump version to ${dev_version}"
-          git push origin main
+          git add VERSION
+          git commit -m "ci(dev): bump version to ${next_version}"
+          git push origin meta/release
