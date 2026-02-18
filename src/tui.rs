@@ -933,7 +933,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 }
 
 fn draw_header(f: &mut ratatui::Frame, area: Rect) {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = env!("VEX_VERSION");
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             " vex ",

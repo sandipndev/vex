@@ -9,7 +9,7 @@ mod tui;
 mod worker;
 mod workstream;
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use cli::{Cli, Commands};
 
 #[macro_export]
@@ -34,7 +34,8 @@ macro_rules! println_err {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let matches = Cli::command().version(env!("VEX_VERSION")).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap();
 
     if config::is_first_run()
         && let None
@@ -93,7 +94,7 @@ fn cmd_completions(shell: cli::ShellChoice) -> Result<(), error::VexError> {
         cli::ShellChoice::Zsh => Shell::Zsh,
         cli::ShellChoice::Fish => Shell::Fish,
     };
-    let mut cmd = Cli::command();
+    let mut cmd = Cli::command().version(env!("VEX_VERSION"));
     generate(shell, &mut cmd, "vex", &mut std::io::stdout());
     Ok(())
 }
