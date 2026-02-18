@@ -17,9 +17,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use crate::config::Config;
 use crate::error::VexError;
 use crate::git;
-use crate::github;
 use crate::repo;
 use crate::tmux;
+use crate::worker::{Worker, WorkerRequest, WorkerResponse};
 use crate::workstream;
 
 struct WorkstreamItem {
@@ -58,6 +58,26 @@ enum InputMode {
     ConfirmDelete,
 }
 
+struct LoadingState {
+    workstreams: bool,
+    preview: bool,
+    pr_cache: bool,
+    pr_details: bool,
+    branches: bool,
+}
+
+impl LoadingState {
+    fn new() -> Self {
+        LoadingState {
+            workstreams: false,
+            preview: false,
+            pr_cache: false,
+            pr_details: false,
+            branches: false,
+        }
+    }
+}
+
 struct App {
     workstreams: Vec<WorkstreamItem>,
     list_state: ListState,
@@ -83,11 +103,21 @@ struct App {
     preview_inner_size: (u16, u16),
     /// (session:window target, original_width, original_height)
     resized_session: Option<(String, u16, u16)>,
+    // Background worker
+    worker: Option<Worker>,
+    loading: LoadingState,
+    initial_load_done: bool,
+    /// After create/rename, select this branch when workstreams refresh
+    pending_select_branch: Option<String>,
 }
 
 impl App {
     fn new(config: Config) -> Self {
-        let mut app = App {
+        let mut worker = Worker::spawn();
+        // Fire off initial async request instead of blocking
+        worker.send(WorkerRequest::RefreshWorkstreams);
+
+        App {
             workstreams: Vec::new(),
             list_state: ListState::default(),
             input_mode: InputMode::Normal,
@@ -108,69 +138,45 @@ impl App {
             pr_cache: HashMap::new(),
             preview_inner_size: (0, 0),
             resized_session: None,
-        };
-        app.refresh_workstreams();
-        app.load_pr_cache();
-        if !app.workstreams.is_empty() {
-            app.list_state.select(Some(0));
-            app.update_preview();
-        }
-        app
-    }
-
-    fn load_pr_cache(&mut self) {
-        // Collect unique repo paths
-        let mut repo_paths: Vec<String> = self
-            .workstreams
-            .iter()
-            .map(|w| w.repo_path.clone())
-            .collect();
-        repo_paths.sort();
-        repo_paths.dedup();
-
-        // One gh call per repo
-        for path in &repo_paths {
-            if let Ok(prs) = github::list_prs(path) {
-                for (branch, num) in prs {
-                    self.pr_cache.insert(format!("{path}/{branch}"), Some(num));
-                }
-            }
-        }
-
-        // Assign pr_number to each workstream item
-        for ws in &mut self.workstreams {
-            let key = format!("{}/{}", ws.repo_path, ws.branch);
-            ws.pr_number = self.pr_cache.get(&key).copied().flatten();
+            worker: Some(worker),
+            loading: LoadingState {
+                workstreams: true,
+                ..LoadingState::new()
+            },
+            initial_load_done: false,
+            pending_select_branch: None,
         }
     }
 
-    fn refresh_workstreams(&mut self) {
-        let repos = repo::list_repos().unwrap_or_default();
-        let active_sessions = tmux::list_sessions().unwrap_or_default();
-
+    /// Apply workstream data from worker response, preserving selection.
+    fn apply_workstream_data(&mut self, items: Vec<crate::worker::WorkstreamData>) {
         let old_selected = self.selected_session();
 
-        let mut items = Vec::new();
-        for repo_meta in &repos {
-            for ws in &repo_meta.workstreams {
-                let session = tmux::session_name(&repo_meta.name, &ws.branch);
-                let active = active_sessions.contains(&session);
-                // Reuse cached PR number
-                let key = format!("{}/{}", repo_meta.path, ws.branch);
+        self.workstreams = items
+            .into_iter()
+            .map(|d| {
+                let key = format!("{}/{}", d.repo_path, d.branch);
                 let pr_number = self.pr_cache.get(&key).copied().flatten();
-                items.push(WorkstreamItem {
-                    repo_name: repo_meta.name.clone(),
-                    branch: ws.branch.clone(),
-                    session,
-                    active,
+                WorkstreamItem {
+                    repo_name: d.repo_name,
+                    branch: d.branch,
+                    session: d.session,
+                    active: d.active,
                     pr_number,
-                    repo_path: repo_meta.path.clone(),
-                });
-            }
-        }
-        self.workstreams = items;
+                    repo_path: d.repo_path,
+                }
+            })
+            .collect();
 
-        // Try to preserve selection
+        // If there's a pending branch selection (from create/rename), prefer that
+        if let Some(branch) = self.pending_select_branch.take()
+            && let Some(idx) = self.workstreams.iter().position(|w| w.branch == branch)
+        {
+            self.list_state.select(Some(idx));
+            return;
+        }
+
+        // Try to preserve selection by session name
         if let Some(old_session) = old_selected
             && let Some(idx) = self
                 .workstreams
@@ -190,6 +196,134 @@ impl App {
         }
     }
 
+    /// Process all pending worker responses. Called at top of each run_loop iteration.
+    fn process_worker_responses(&mut self) {
+        let worker = match self.worker.as_mut() {
+            Some(w) => w,
+            None => return,
+        };
+        let responses = worker.try_recv_all();
+
+        for resp in responses {
+            match resp {
+                WorkerResponse::WorkstreamsRefreshed { items } => {
+                    self.loading.workstreams = false;
+                    self.apply_workstream_data(items);
+
+                    if !self.initial_load_done {
+                        self.initial_load_done = true;
+                        if !self.workstreams.is_empty() && self.list_state.selected().is_none() {
+                            self.list_state.select(Some(0));
+                        }
+                        // Trigger PR cache load on first load
+                        let mut repo_paths: Vec<String> = self
+                            .workstreams
+                            .iter()
+                            .map(|w| w.repo_path.clone())
+                            .collect();
+                        repo_paths.sort();
+                        repo_paths.dedup();
+                        if !repo_paths.is_empty()
+                            && let Some(w) = self.worker.as_mut()
+                            && w.send(WorkerRequest::LoadPrCache { repo_paths })
+                        {
+                            self.loading.pr_cache = true;
+                        }
+                    }
+
+                    // Request pane capture for selected workstream
+                    self.request_capture_pane();
+                }
+
+                WorkerResponse::PaneCaptured {
+                    session,
+                    window,
+                    content,
+                } => {
+                    self.loading.preview = false;
+                    // Only update if it still matches the selected workstream
+                    let matches = self
+                        .selected()
+                        .is_some_and(|ws| ws.session == session && ws.active)
+                        && window == self.config.default_window;
+                    if matches {
+                        self.preview_content = content;
+                    }
+                }
+
+                WorkerResponse::PrCacheLoaded { entries } => {
+                    self.loading.pr_cache = false;
+                    for (key, num) in entries {
+                        self.pr_cache.insert(key, Some(num));
+                    }
+                    // Update pr_number on all workstream items
+                    for ws in &mut self.workstreams {
+                        let key = format!("{}/{}", ws.repo_path, ws.branch);
+                        ws.pr_number = self.pr_cache.get(&key).copied().flatten();
+                    }
+                }
+
+                WorkerResponse::PrDetailsFetched { pr_number, content } => {
+                    self.loading.pr_details = false;
+                    // Verify we're still on the GitHub panel and the PR matches
+                    let matches = self.panel_view == PanelView::GitHubPr
+                        && self
+                            .selected()
+                            .and_then(|ws| ws.pr_number)
+                            .is_some_and(|n| n == pr_number);
+                    if matches {
+                        self.github_content = content;
+                    }
+                }
+
+                WorkerResponse::BranchesListed { branches } => {
+                    self.loading.branches = false;
+                    // Only transition if we're still waiting for branches
+                    if !self.pending_new_branch.is_empty() {
+                        self.branch_candidates = branches;
+                        self.branch_list_state
+                            .select(if self.branch_candidates.is_empty() {
+                                None
+                            } else {
+                                Some(0)
+                            });
+                        self.input_mode = InputMode::SelectBaseBranch;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send a CapturePane request if appropriate for the current selection.
+    fn request_capture_pane(&mut self) {
+        if self.panel_view != PanelView::DefaultWindow {
+            return;
+        }
+        let ws_info = self.selected().map(|ws| (ws.session.clone(), ws.active));
+        let default_window = self.config.default_window.clone();
+
+        if let Some((session, active)) = ws_info {
+            if active {
+                let (pw, ph) = self.preview_inner_size;
+                if pw > 0 && ph > 0 {
+                    self.ensure_pane_resized(&session, &default_window, pw, ph);
+                }
+                if let Some(w) = self.worker.as_mut()
+                    && w.send(WorkerRequest::CapturePane {
+                        session,
+                        window: default_window,
+                    })
+                {
+                    self.loading.preview = true;
+                }
+            } else {
+                self.preview_content = "(session not active)".into();
+            }
+        } else {
+            self.preview_content = "(no workstreams)".into();
+        }
+    }
+
     fn selected(&self) -> Option<&WorkstreamItem> {
         self.list_state
             .selected()
@@ -198,33 +332,6 @@ impl App {
 
     fn selected_session(&self) -> Option<String> {
         self.selected().map(|w| w.session.clone())
-    }
-
-    fn update_preview(&mut self) {
-        match self.panel_view {
-            PanelView::DefaultWindow => {
-                // Extract needed values to avoid borrow conflicts
-                let ws_info = self.selected().map(|ws| (ws.session.clone(), ws.active));
-                let default_window = self.config.default_window.clone();
-
-                if let Some((session, active)) = ws_info {
-                    if active {
-                        let (pw, ph) = self.preview_inner_size;
-                        if pw > 0 && ph > 0 {
-                            self.ensure_pane_resized(&session, &default_window, pw, ph);
-                        }
-                        self.preview_content = tmux::capture_pane_ansi(&session, &default_window);
-                    } else {
-                        self.preview_content = "(session not active)".into();
-                    }
-                } else {
-                    self.preview_content = "(no workstreams)".into();
-                }
-            }
-            PanelView::GitHubPr => {
-                // Skip — fetched on demand when Tab toggles to it
-            }
-        }
     }
 
     fn ensure_pane_resized(&mut self, session: &str, window: &str, width: u16, height: u16) {
@@ -276,7 +383,7 @@ impl App {
         {
             self.github_content = format!("Press Tab to load PR for '{}'", ws.branch);
         }
-        self.update_preview();
+        self.request_capture_pane();
     }
 
     fn move_down(&mut self) {
@@ -295,7 +402,7 @@ impl App {
         {
             self.github_content = format!("Press Tab to load PR for '{}'", ws.branch);
         }
-        self.update_preview();
+        self.request_capture_pane();
     }
 
     fn scroll_up(&mut self) {
@@ -314,9 +421,14 @@ impl App {
                 if let Some(ws) = self.selected() {
                     if let Some(pr_num) = ws.pr_number {
                         let repo_path = ws.repo_path.clone();
-                        match github::pr_view_full(&repo_path, pr_num) {
-                            Ok(content) => self.github_content = content,
-                            Err(e) => self.github_content = format!("Error fetching PR: {e}"),
+                        self.github_content = "(loading PR details...)".into();
+                        if let Some(w) = self.worker.as_mut()
+                            && w.send(WorkerRequest::FetchPrDetails {
+                                repo_path,
+                                pr_number: pr_num,
+                            })
+                        {
+                            self.loading.pr_details = true;
                         }
                     } else {
                         self.github_content = format!("No PR found for branch '{}'", ws.branch);
@@ -327,7 +439,7 @@ impl App {
             }
             PanelView::GitHubPr => {
                 self.panel_view = PanelView::DefaultWindow;
-                self.update_preview();
+                self.request_capture_pane();
             }
         }
     }
@@ -409,14 +521,15 @@ impl App {
             return;
         };
 
-        self.branch_candidates = git::list_branches(&path).unwrap_or_default();
-        self.branch_list_state
-            .select(if self.branch_candidates.is_empty() {
-                None
-            } else {
-                Some(0)
-            });
-        self.input_mode = InputMode::SelectBaseBranch;
+        // Send async request for branches
+        self.set_status("Loading branches...");
+        if let Some(w) = self.worker.as_mut()
+            && w.send(WorkerRequest::ListBranches { repo_path: path })
+        {
+            self.loading.branches = true;
+        }
+        // Transition to SelectBaseBranch happens in process_worker_responses
+        // when BranchesListed arrives
     }
 
     fn filtered_branches(&self) -> Vec<(usize, &str)> {
@@ -449,11 +562,11 @@ impl App {
         match workstream::create_no_attach(None, branch, base) {
             Ok(_session) => {
                 self.set_status(format!("Created workstream '{branch}'"));
-                self.refresh_workstreams();
-                if let Some(idx) = self.workstreams.iter().position(|w| w.branch == branch) {
-                    self.list_state.select(Some(idx));
+                self.pending_select_branch = Some(branch.to_string());
+                if let Some(w) = self.worker.as_mut() {
+                    w.send(WorkerRequest::RefreshWorkstreams);
+                    self.loading.workstreams = true;
                 }
-                self.update_preview();
             }
             Err(e) => self.set_status(format!("Error: {e}")),
         }
@@ -473,8 +586,10 @@ impl App {
             match workstream::remove(Some(&repo_name), &branch) {
                 Ok(()) => {
                     self.set_status(format!("Deleted workstream '{branch}'"));
-                    self.refresh_workstreams();
-                    self.update_preview();
+                    if let Some(w) = self.worker.as_mut() {
+                        w.send(WorkerRequest::RefreshWorkstreams);
+                        self.loading.workstreams = true;
+                    }
                 }
                 Err(e) => self.set_status(format!("Error: {e}")),
             }
@@ -509,8 +624,11 @@ impl App {
             match workstream::rename(Some(&repo_name), Some(&old_branch), &new_branch) {
                 Ok(()) => {
                     self.set_status(format!("Renamed '{old_branch}' -> '{new_branch}'"));
-                    self.refresh_workstreams();
-                    self.update_preview();
+                    self.pending_select_branch = Some(new_branch);
+                    if let Some(w) = self.worker.as_mut() {
+                        w.send(WorkerRequest::RefreshWorkstreams);
+                        self.loading.workstreams = true;
+                    }
                 }
                 Err(e) => self.set_status(format!("Error: {e}")),
             }
@@ -593,6 +711,11 @@ pub fn run() -> Result<(), VexError> {
     // Restore pane size before exiting
     app.restore_pane_size();
 
+    // Shut down worker thread
+    if let Some(worker) = app.worker.take() {
+        worker.shutdown();
+    }
+
     // Restore terminal
     terminal::disable_raw_mode().ok();
     execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
@@ -615,6 +738,9 @@ fn run_loop(
     refresh_interval: Duration,
 ) -> Result<(), VexError> {
     loop {
+        // Process any pending worker responses before drawing
+        app.process_worker_responses();
+
         terminal
             .draw(|f| ui(f, app))
             .map_err(|e| VexError::ConfigError(format!("draw error: {e}")))?;
@@ -681,6 +807,7 @@ fn run_loop(
                     KeyCode::Enter => app.confirm_create(),
                     KeyCode::Esc => {
                         app.input_mode = InputMode::Normal;
+                        app.pending_new_branch.clear();
                         app.set_status("Cancelled");
                     }
                     _ => app.handle_input_key(key.code),
@@ -753,10 +880,12 @@ fn run_loop(
 
         // Periodic refresh (and always refresh preview in Interact mode)
         if app.input_mode == InputMode::Interact || last_refresh.elapsed() >= refresh_interval {
-            if app.input_mode != InputMode::Interact {
-                app.refresh_workstreams();
+            if app.input_mode != InputMode::Interact
+                && let Some(w) = app.worker.as_mut()
+            {
+                w.send(WorkerRequest::RefreshWorkstreams);
             }
-            app.update_preview();
+            app.request_capture_pane();
             *last_refresh = Instant::now();
         }
 
@@ -818,18 +947,24 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
 }
 
 fn draw_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let items: Vec<ListItem> = app
-        .workstreams
-        .iter()
-        .map(|ws| {
-            let style = if ws.active {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            ListItem::new(Line::from(Span::styled(ws.display(), style)))
-        })
-        .collect();
+    let items: Vec<ListItem> = if app.workstreams.is_empty() && app.loading.workstreams {
+        vec![ListItem::new(Line::from(Span::styled(
+            "(loading...)",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        app.workstreams
+            .iter()
+            .map(|ws| {
+                let style = if ws.active {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                ListItem::new(Line::from(Span::styled(ws.display(), style)))
+            })
+            .collect()
+    };
 
     let list = List::new(items)
         .block(
@@ -856,8 +991,16 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     match app.panel_view {
         PanelView::DefaultWindow => {
+            let refreshing = if app.loading.preview {
+                " (refreshing)"
+            } else {
+                ""
+            };
             let title = match app.selected() {
-                Some(ws) => format!(" {} - {} ", app.config.default_window, ws.session),
+                Some(ws) => format!(
+                    " {} - {}{} ",
+                    app.config.default_window, ws.session, refreshing
+                ),
                 None => " Preview ".into(),
             };
             let border_color = if app.input_mode == InputMode::Interact {
