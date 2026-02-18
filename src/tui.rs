@@ -46,6 +46,7 @@ impl WorkstreamItem {
 enum PanelView {
     DefaultWindow,
     GitHubPr,
+    PrList,
 }
 
 #[derive(PartialEq)]
@@ -56,6 +57,15 @@ enum InputMode {
     SelectBaseBranch,
     Rename,
     ConfirmDelete,
+    PrList,
+}
+
+struct PrListDisplayItem {
+    number: u64,
+    title: String,
+    branch: String,
+    author: String,
+    already_checked_out: bool,
 }
 
 struct LoadingState {
@@ -109,6 +119,13 @@ struct App {
     initial_load_done: bool,
     /// After create/rename, select this branch when workstreams refresh
     pending_select_branch: Option<String>,
+    // PR list mode
+    pr_list_items: Vec<PrListDisplayItem>,
+    pr_list_state: ListState,
+    pr_list_repo_path: String,
+    pr_list_repo_name: String,
+    // Background git fetch
+    last_fetch: Instant,
 }
 
 impl App {
@@ -145,6 +162,11 @@ impl App {
             },
             initial_load_done: false,
             pending_select_branch: None,
+            pr_list_items: Vec::new(),
+            pr_list_state: ListState::default(),
+            pr_list_repo_path: String::new(),
+            pr_list_repo_name: String::new(),
+            last_fetch: Instant::now(),
         }
     }
 
@@ -225,9 +247,18 @@ impl App {
                         repo_paths.dedup();
                         if !repo_paths.is_empty()
                             && let Some(w) = self.worker.as_mut()
-                            && w.send(WorkerRequest::LoadPrCache { repo_paths })
+                            && w.send(WorkerRequest::LoadPrCache {
+                                repo_paths: repo_paths.clone(),
+                            })
                         {
                             self.loading.pr_cache = true;
+                        }
+                        // Fire initial git fetch
+                        if !repo_paths.is_empty()
+                            && let Some(w) = self.worker.as_mut()
+                        {
+                            w.send(WorkerRequest::GitFetch { repo_paths });
+                            self.last_fetch = Instant::now();
                         }
                     }
 
@@ -265,14 +296,25 @@ impl App {
 
                 WorkerResponse::PrDetailsFetched { pr_number, content } => {
                     self.loading.pr_details = false;
-                    // Verify we're still on the GitHub panel and the PR matches
-                    let matches = self.panel_view == PanelView::GitHubPr
-                        && self
+                    if self.panel_view == PanelView::PrList {
+                        // In PR list mode, show details for the selected PR
+                        let matches = self
+                            .pr_list_state
+                            .selected()
+                            .and_then(|i| self.pr_list_items.get(i))
+                            .is_some_and(|pr| pr.number == pr_number);
+                        if matches {
+                            self.github_content = content;
+                        }
+                    } else if self.panel_view == PanelView::GitHubPr {
+                        // In normal GitHub panel mode
+                        let matches = self
                             .selected()
                             .and_then(|ws| ws.pr_number)
                             .is_some_and(|n| n == pr_number);
-                    if matches {
-                        self.github_content = content;
+                        if matches {
+                            self.github_content = content;
+                        }
                     }
                 }
 
@@ -288,6 +330,52 @@ impl App {
                                 Some(0)
                             });
                         self.input_mode = InputMode::SelectBaseBranch;
+                    }
+                }
+
+                WorkerResponse::GitFetchCompleted => {
+                    // Reload PR cache after fetch
+                    let mut repo_paths: Vec<String> = self
+                        .workstreams
+                        .iter()
+                        .map(|w| w.repo_path.clone())
+                        .collect();
+                    repo_paths.sort();
+                    repo_paths.dedup();
+                    if !repo_paths.is_empty()
+                        && let Some(w) = self.worker.as_mut()
+                    {
+                        w.send(WorkerRequest::LoadPrCache { repo_paths });
+                    }
+                    // If in PR list mode, re-fetch the PR list
+                    if self.input_mode == InputMode::PrList
+                        && !self.pr_list_repo_path.is_empty()
+                        && let Some(w) = self.worker.as_mut()
+                    {
+                        w.send(WorkerRequest::ListPrs {
+                            repo_path: self.pr_list_repo_path.clone(),
+                        });
+                    }
+                }
+
+                WorkerResponse::PrsListed { repo_path, prs } => {
+                    if self.input_mode == InputMode::PrList && self.pr_list_repo_path == repo_path {
+                        let checked_out_branches: Vec<String> =
+                            self.workstreams.iter().map(|w| w.branch.clone()).collect();
+                        self.pr_list_items = prs
+                            .into_iter()
+                            .map(|pr| PrListDisplayItem {
+                                already_checked_out: checked_out_branches.contains(&pr.head_ref),
+                                number: pr.number,
+                                title: pr.title,
+                                branch: pr.head_ref,
+                                author: pr.author,
+                            })
+                            .collect();
+                        if !self.pr_list_items.is_empty() && self.pr_list_state.selected().is_none()
+                        {
+                            self.pr_list_state.select(Some(0));
+                        }
                     }
                 }
             }
@@ -441,6 +529,9 @@ impl App {
                 self.panel_view = PanelView::DefaultWindow;
                 self.request_capture_pane();
             }
+            PanelView::PrList => {
+                // Toggle not applicable from PR list mode
+            }
         }
     }
 
@@ -559,7 +650,7 @@ impl App {
 
     fn do_create_workstream(&mut self, branch: &str, base: Option<&str>) {
         self.input_mode = InputMode::Normal;
-        match workstream::create_no_attach(None, branch, base) {
+        match workstream::create_no_attach(None, branch, base, true) {
             Ok(_session) => {
                 self.set_status(format!("Created workstream '{branch}'"));
                 self.pending_select_branch = Some(branch.to_string());
@@ -583,7 +674,7 @@ impl App {
             let repo_name = ws.repo_name.clone();
             let branch = ws.branch.clone();
             self.input_mode = InputMode::Normal;
-            match workstream::remove(Some(&repo_name), &branch) {
+            match workstream::remove(Some(&repo_name), &branch, true) {
                 Ok(()) => {
                     self.set_status(format!("Deleted workstream '{branch}'"));
                     if let Some(w) = self.worker.as_mut() {
@@ -621,7 +712,7 @@ impl App {
                 self.set_status("Cancelled: same name");
                 return;
             }
-            match workstream::rename(Some(&repo_name), Some(&old_branch), &new_branch) {
+            match workstream::rename(Some(&repo_name), Some(&old_branch), &new_branch, true) {
                 Ok(()) => {
                     self.set_status(format!("Renamed '{old_branch}' -> '{new_branch}'"));
                     self.pending_select_branch = Some(new_branch);
@@ -661,6 +752,143 @@ impl App {
             KeyCode::End => self.input_cursor = self.input_buffer.len(),
             _ => {}
         }
+    }
+
+    fn enter_pr_list(&mut self) {
+        // Find the first repo path to list PRs for
+        let repo_info = self
+            .workstreams
+            .first()
+            .map(|w| (w.repo_path.clone(), w.repo_name.clone()))
+            .or_else(|| {
+                repo::list_repos()
+                    .ok()
+                    .and_then(|repos| repos.into_iter().next())
+                    .map(|r| (r.path.clone(), r.name.clone()))
+            });
+
+        let Some((repo_path, repo_name)) = repo_info else {
+            self.set_status("No repos registered");
+            return;
+        };
+
+        self.input_mode = InputMode::PrList;
+        self.panel_view = PanelView::PrList;
+        self.panel_scroll = 0;
+        self.pr_list_items.clear();
+        self.pr_list_state.select(None);
+        self.pr_list_repo_path = repo_path.clone();
+        self.pr_list_repo_name = repo_name;
+        self.github_content = "(select a PR and press Tab for details)".into();
+
+        // Send ListPrs request
+        if let Some(w) = self.worker.as_mut() {
+            w.send(WorkerRequest::ListPrs {
+                repo_path: repo_path.clone(),
+            });
+        }
+
+        // Trigger a fetch if stale (>10s)
+        if self.last_fetch.elapsed() > Duration::from_secs(10) {
+            if let Some(w) = self.worker.as_mut() {
+                w.send(WorkerRequest::GitFetch {
+                    repo_paths: vec![repo_path],
+                });
+            }
+            self.last_fetch = Instant::now();
+        }
+    }
+
+    fn leave_pr_list(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.panel_view = PanelView::DefaultWindow;
+        self.panel_scroll = 0;
+        self.request_capture_pane();
+    }
+
+    fn checkout_selected_pr(&mut self) {
+        let selected = self
+            .pr_list_state
+            .selected()
+            .and_then(|i| self.pr_list_items.get(i));
+        let Some(pr) = selected else { return };
+
+        if pr.already_checked_out {
+            // Switch to existing workstream
+            let branch = pr.branch.clone();
+            if let Some(idx) = self.workstreams.iter().position(|w| w.branch == branch) {
+                self.list_state.select(Some(idx));
+                self.leave_pr_list();
+                self.set_status(format!("Switched to existing workstream '{branch}'"));
+            }
+            return;
+        }
+
+        let branch = pr.branch.clone();
+        let pr_number = pr.number;
+        let repo_name = self.pr_list_repo_name.clone();
+
+        self.set_status(format!("Checking out PR #{pr_number}..."));
+
+        match workstream::checkout_pr(&repo_name, &branch, pr_number, true) {
+            Ok(_session) => {
+                self.set_status(format!("Checked out PR #{pr_number} ('{branch}')"));
+                self.pending_select_branch = Some(branch);
+                if let Some(w) = self.worker.as_mut() {
+                    w.send(WorkerRequest::RefreshWorkstreams);
+                    self.loading.workstreams = true;
+                }
+                self.leave_pr_list();
+            }
+            Err(e) => self.set_status(format!("Error: {e}")),
+        }
+    }
+
+    fn pr_list_show_details(&mut self) {
+        let selected = self
+            .pr_list_state
+            .selected()
+            .and_then(|i| self.pr_list_items.get(i));
+        let Some(pr) = selected else { return };
+
+        let pr_number = pr.number;
+        let repo_path = self.pr_list_repo_path.clone();
+        self.github_content = "(loading PR details...)".into();
+        self.panel_scroll = 0;
+        if let Some(w) = self.worker.as_mut()
+            && w.send(WorkerRequest::FetchPrDetails {
+                repo_path,
+                pr_number,
+            })
+        {
+            self.loading.pr_details = true;
+        }
+    }
+
+    fn pr_list_move_up(&mut self) {
+        if self.pr_list_items.is_empty() {
+            return;
+        }
+        let i = match self.pr_list_state.selected() {
+            Some(i) if i > 0 => i - 1,
+            Some(_) => self.pr_list_items.len() - 1,
+            None => 0,
+        };
+        self.pr_list_state.select(Some(i));
+        self.panel_scroll = 0;
+    }
+
+    fn pr_list_move_down(&mut self) {
+        if self.pr_list_items.is_empty() {
+            return;
+        }
+        let i = match self.pr_list_state.selected() {
+            Some(i) if i < self.pr_list_items.len() - 1 => i + 1,
+            Some(_) => 0,
+            None => 0,
+        };
+        self.pr_list_state.select(Some(i));
+        self.panel_scroll = 0;
     }
 }
 
@@ -792,6 +1020,7 @@ fn run_loop(
                             KeyCode::Char('n') => app.start_create(),
                             KeyCode::Char('d') => app.start_delete(),
                             KeyCode::Char('r') => app.start_rename(),
+                            KeyCode::Char('p') => app.enter_pr_list(),
                             _ => {}
                         }
                     }
@@ -875,6 +1104,14 @@ fn run_loop(
                         app.set_status("Cancelled");
                     }
                 },
+                InputMode::PrList => match key.code {
+                    KeyCode::Esc => app.leave_pr_list(),
+                    KeyCode::Char('j') | KeyCode::Down => app.pr_list_move_down(),
+                    KeyCode::Char('k') | KeyCode::Up => app.pr_list_move_up(),
+                    KeyCode::Enter => app.checkout_selected_pr(),
+                    KeyCode::Tab => app.pr_list_show_details(),
+                    _ => {}
+                },
             }
         }
 
@@ -887,6 +1124,23 @@ fn run_loop(
             }
             app.request_capture_pane();
             *last_refresh = Instant::now();
+        }
+
+        // Periodic git fetch (every 60s)
+        if app.last_fetch.elapsed() >= Duration::from_secs(60) {
+            let mut repo_paths: Vec<String> = app
+                .workstreams
+                .iter()
+                .map(|w| w.repo_path.clone())
+                .collect();
+            repo_paths.sort();
+            repo_paths.dedup();
+            if !repo_paths.is_empty()
+                && let Some(w) = app.worker.as_mut()
+            {
+                w.send(WorkerRequest::GitFetch { repo_paths });
+            }
+            app.last_fetch = Instant::now();
         }
 
         // Clear stale status messages (after 3 seconds)
@@ -915,18 +1169,29 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     draw_header(f, outer[0]);
 
-    // Content: left list + right preview
-    let content = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(outer[1]);
+    if app.input_mode == InputMode::PrList {
+        // PR list mode: left PR list + right PR details
+        let content = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(outer[1]);
 
-    draw_list(f, app, content[0]);
-    if app.input_mode == InputMode::SelectBaseBranch {
-        draw_branch_picker(f, app, content[1]);
+        draw_pr_list(f, app, content[0]);
+        draw_pr_detail_panel(f, app, content[1]);
     } else {
-        let preview_area = content[1];
-        draw_preview(f, app, preview_area);
+        // Normal mode: left workstream list + right preview
+        let content = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(outer[1]);
+
+        draw_list(f, app, content[0]);
+        if app.input_mode == InputMode::SelectBaseBranch {
+            draw_branch_picker(f, app, content[1]);
+        } else {
+            let preview_area = content[1];
+            draw_preview(f, app, preview_area);
+        }
     }
     draw_status(f, app, outer[2]);
     draw_help(f, app, outer[3]);
@@ -991,16 +1256,8 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     match app.panel_view {
         PanelView::DefaultWindow => {
-            let refreshing = if app.loading.preview {
-                " (refreshing)"
-            } else {
-                ""
-            };
             let title = match app.selected() {
-                Some(ws) => format!(
-                    " {} - {}{} ",
-                    app.config.default_window, ws.session, refreshing
-                ),
+                Some(ws) => format!(" {} - {} ", app.config.default_window, ws.session),
                 None => " Preview ".into(),
             };
             let border_color = if app.input_mode == InputMode::Interact {
@@ -1051,7 +1308,78 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
             f.render_widget(preview, area);
         }
+        PanelView::PrList => {
+            // Handled by draw_pr_list / draw_pr_detail_panel in PrList mode
+        }
     }
+}
+
+fn draw_pr_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = if app.pr_list_items.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "(loading PRs...)",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        app.pr_list_items
+            .iter()
+            .map(|pr| {
+                let checked = if pr.already_checked_out {
+                    " [checked out]"
+                } else {
+                    ""
+                };
+                let display = format!(
+                    "#{} {} (@{}) {}{}",
+                    pr.number, pr.branch, pr.author, pr.title, checked
+                );
+                let style = if pr.already_checked_out {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(Line::from(Span::styled(display, style)))
+            })
+            .collect()
+    };
+
+    let title = format!(" Open PRs ({}) ", app.pr_list_repo_name);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta)),
+        )
+        .highlight_style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Cyan),
+        )
+        .highlight_symbol("> ");
+
+    f.render_stateful_widget(list, area, &mut app.pr_list_state);
+}
+
+fn draw_pr_detail_panel(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let title = app
+        .pr_list_state
+        .selected()
+        .and_then(|i| app.pr_list_items.get(i))
+        .map(|pr| format!(" PR #{} ", pr.number))
+        .unwrap_or_else(|| " PR Details ".into());
+
+    let preview = Paragraph::new(Text::from(app.github_content.as_str()))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue)),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.panel_scroll, 0));
+
+    f.render_widget(preview, area);
 }
 
 fn draw_branch_picker(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -1111,7 +1439,7 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Red),
             ))
         }
-        InputMode::Normal | InputMode::Interact => {
+        InputMode::Normal | InputMode::Interact | InputMode::PrList => {
             if let Some((msg, _)) = &app.status_message {
                 Line::from(Span::styled(
                     msg.as_str(),
@@ -1130,7 +1458,7 @@ fn draw_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
 fn draw_help(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let help_text = match app.input_mode {
         InputMode::Normal => {
-            "[Enter] Interact  [Tab] Toggle PR  [^O] Open  [j/k] Navigate  [n] New  [d] Del  [r] Rename  [q] Quit"
+            "[Enter] Interact  [Tab] Toggle PR  [^O] Open  [j/k] Navigate  [n] New  [d] Del  [r] Rename  [p] PRs  [q] Quit"
         }
         InputMode::Interact => "[Esc] Back  \u{2500}  Keystrokes forwarded to pane",
         InputMode::CreateNew | InputMode::Rename => "[Enter] Confirm  [Esc] Cancel",
@@ -1138,6 +1466,7 @@ fn draw_help(f: &mut ratatui::Frame, app: &App, area: Rect) {
             "[Enter] Select  [Up/Down] Navigate  [type] Filter  [Esc] Cancel"
         }
         InputMode::ConfirmDelete => "[y] Confirm  [any] Cancel",
+        InputMode::PrList => "[Enter] Checkout  [Tab] Details  [j/k] Navigate  [Esc] Back",
     };
 
     let help = Paragraph::new(Line::from(Span::styled(

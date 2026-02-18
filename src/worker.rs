@@ -21,6 +21,8 @@ pub enum WorkerRequest {
     LoadPrCache { repo_paths: Vec<String> },
     FetchPrDetails { repo_path: String, pr_number: u64 },
     ListBranches { repo_path: String },
+    GitFetch { repo_paths: Vec<String> },
+    ListPrs { repo_path: String },
     Shutdown,
 }
 
@@ -43,6 +45,11 @@ pub enum WorkerResponse {
     BranchesListed {
         branches: Vec<String>,
     },
+    GitFetchCompleted,
+    PrsListed {
+        repo_path: String,
+        prs: Vec<github::PrListEntry>,
+    },
 }
 
 /// Coarsened key for deduplication — ignores volatile params.
@@ -53,6 +60,8 @@ enum RequestKey {
     LoadPrCache,
     FetchPrDetails,
     ListBranches,
+    GitFetch,
+    ListPrs,
 }
 
 impl WorkerRequest {
@@ -63,6 +72,8 @@ impl WorkerRequest {
             WorkerRequest::LoadPrCache { .. } => Some(RequestKey::LoadPrCache),
             WorkerRequest::FetchPrDetails { .. } => Some(RequestKey::FetchPrDetails),
             WorkerRequest::ListBranches { .. } => Some(RequestKey::ListBranches),
+            WorkerRequest::GitFetch { .. } => Some(RequestKey::GitFetch),
+            WorkerRequest::ListPrs { .. } => Some(RequestKey::ListPrs),
             WorkerRequest::Shutdown => None,
         }
     }
@@ -76,6 +87,8 @@ impl WorkerResponse {
             WorkerResponse::PrCacheLoaded { .. } => RequestKey::LoadPrCache,
             WorkerResponse::PrDetailsFetched { .. } => RequestKey::FetchPrDetails,
             WorkerResponse::BranchesListed { .. } => RequestKey::ListBranches,
+            WorkerResponse::GitFetchCompleted => RequestKey::GitFetch,
+            WorkerResponse::PrsListed { .. } => RequestKey::ListPrs,
         }
     }
 }
@@ -195,6 +208,18 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
             WorkerRequest::ListBranches { repo_path } => {
                 let branches = crate::git::list_branches(&repo_path).unwrap_or_default();
                 let _ = tx.send(WorkerResponse::BranchesListed { branches });
+            }
+
+            WorkerRequest::GitFetch { repo_paths } => {
+                for path in &repo_paths {
+                    let _ = crate::git::fetch(path);
+                }
+                let _ = tx.send(WorkerResponse::GitFetchCompleted);
+            }
+
+            WorkerRequest::ListPrs { repo_path } => {
+                let prs = github::list_prs_detailed(&repo_path).unwrap_or_default();
+                let _ = tx.send(WorkerResponse::PrsListed { repo_path, prs });
             }
         }
     }

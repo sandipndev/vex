@@ -59,7 +59,7 @@ fn main() {
         Some(Commands::Switch { branch, repo }) => {
             workstream::switch(repo.as_deref(), branch.as_deref())
         }
-        Some(Commands::Rm { branch, repo }) => workstream::remove(repo.as_deref(), &branch),
+        Some(Commands::Rm { branch, repo }) => workstream::remove(repo.as_deref(), &branch, false),
         Some(Commands::List { repo }) => workstream::list(repo.as_deref()),
         Some(Commands::Exit) => workstream::exit(),
         Some(Commands::Rth { branch, repo }) => workstream::rth(repo.as_deref(), branch.as_deref()),
@@ -75,7 +75,7 @@ fn main() {
                 Some(nb) => (Some(branch.as_str()), nb.as_str()),
                 None => (None, branch.as_str()),
             };
-            workstream::rename(repo.as_deref(), old, new_name)
+            workstream::rename(repo.as_deref(), old, new_name, false)
         }
         Some(Commands::Doctor) => workstream::doctor(),
         Some(Commands::Completions { shell }) => cmd_completions(shell),
