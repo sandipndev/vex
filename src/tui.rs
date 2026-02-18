@@ -3,7 +3,6 @@ use std::io;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ansi_to_tui::IntoText as _;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
@@ -109,10 +108,6 @@ struct App {
     github_content: String,
     panel_scroll: u16,
     pr_cache: HashMap<String, Option<u64>>,
-    // Pane resize tracking
-    preview_inner_size: (u16, u16),
-    /// (session:window target, original_width, original_height)
-    resized_session: Option<(String, u16, u16)>,
     // Background worker
     worker: Option<Worker>,
     loading: LoadingState,
@@ -153,8 +148,6 @@ impl App {
             github_content: String::new(),
             panel_scroll: 0,
             pr_cache: HashMap::new(),
-            preview_inner_size: (0, 0),
-            resized_session: None,
             worker: Some(worker),
             loading: LoadingState {
                 workstreams: true,
@@ -392,10 +385,6 @@ impl App {
 
         if let Some((session, active)) = ws_info {
             if active {
-                let (pw, ph) = self.preview_inner_size;
-                if pw > 0 && ph > 0 {
-                    self.ensure_pane_resized(&session, &default_window, pw, ph);
-                }
                 if let Some(w) = self.worker.as_mut()
                     && w.send(WorkerRequest::CapturePane {
                         session,
@@ -420,35 +409,6 @@ impl App {
 
     fn selected_session(&self) -> Option<String> {
         self.selected().map(|w| w.session.clone())
-    }
-
-    fn ensure_pane_resized(&mut self, session: &str, window: &str, width: u16, height: u16) {
-        let target = format!("{session}:{window}");
-
-        if let Some((ref t, _, _)) = self.resized_session
-            && *t != target
-        {
-            // Different session — restore the old one before resizing the new one
-            self.restore_pane_size();
-        }
-
-        if self.resized_session.as_ref().is_none_or(|r| r.0 != target) {
-            // Save original size before first resize of this session
-            if let Some((orig_w, orig_h)) = tmux::window_size(session, window) {
-                self.resized_session = Some((target, orig_w, orig_h));
-            }
-        }
-
-        tmux::resize_window(session, window, width, height);
-    }
-
-    fn restore_pane_size(&mut self) {
-        if let Some((target, orig_w, orig_h)) = self.resized_session.take() {
-            // Parse session:window from the target
-            if let Some((session, window)) = target.split_once(':') {
-                tmux::resize_window(session, window, orig_w, orig_h);
-            }
-        }
     }
 
     fn set_status(&mut self, msg: impl Into<String>) {
@@ -566,8 +526,6 @@ impl App {
                     }
                 }
             }
-            // Restore pane size before attaching
-            self.restore_pane_size();
             self.should_switch = Some(session);
             self.should_quit = true;
         }
@@ -936,9 +894,6 @@ pub fn run() -> Result<(), VexError> {
 
     let result = run_loop(&mut terminal, &mut app, &mut last_refresh, refresh_interval);
 
-    // Restore pane size before exiting
-    app.restore_pane_size();
-
     // Shut down worker thread
     if let Some(worker) = app.worker.take() {
         worker.shutdown();
@@ -1249,11 +1204,6 @@ fn draw_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    // Store inner area dimensions for pane resizing
-    let inner_w = area.width.saturating_sub(2);
-    let inner_h = area.height.saturating_sub(2);
-    app.preview_inner_size = (inner_w, inner_h);
-
     match app.panel_view {
         PanelView::DefaultWindow => {
             let title = match app.selected() {
@@ -1266,20 +1216,14 @@ fn draw_preview(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 Color::Blue
             };
 
-            // Parse ANSI escape codes into styled Text
-            let text = app
-                .preview_content
-                .as_bytes()
-                .into_text()
-                .unwrap_or_else(|_| Text::from(app.preview_content.as_str()));
-
-            let preview = Paragraph::new(text)
+            let preview = Paragraph::new(Text::from(app.preview_content.as_str()))
                 .block(
                     Block::default()
                         .title(title)
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(border_color)),
                 )
+                .wrap(Wrap { trim: false })
                 .scroll((app.panel_scroll, 0));
 
             f.render_widget(preview, area);
