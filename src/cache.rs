@@ -94,7 +94,7 @@ impl PrCache {
             .ok()?;
         let rows = stmt
             .query_map(rusqlite::params![repo_path, cutoff], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .ok()?;
         let results: Vec<(String, u64)> = rows.filter_map(|r| r.ok()).collect();
@@ -114,7 +114,7 @@ impl PrCache {
         for (branch, pr_number) in entries {
             let _ = self.conn.execute(
                 "INSERT OR REPLACE INTO pr_numbers (repo_path, branch, pr_number, fetched_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![repo_path, branch, pr_number, now],
+                rusqlite::params![repo_path, branch, *pr_number as i64, now],
             );
         }
     }
@@ -125,7 +125,7 @@ impl PrCache {
         self.conn
             .query_row(
                 "SELECT data_json FROM pr_structured WHERE repo_path = ?1 AND pr_number = ?2 AND fetched_at >= ?3",
-                rusqlite::params![repo_path, pr_number, cutoff],
+                rusqlite::params![repo_path, pr_number as i64, cutoff],
                 |row| row.get(0),
             )
             .ok()
@@ -136,7 +136,7 @@ impl PrCache {
         let now = Self::now();
         let _ = self.conn.execute(
             "INSERT OR REPLACE INTO pr_structured (repo_path, pr_number, data_json, fetched_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![repo_path, pr_number, data, now],
+            rusqlite::params![repo_path, pr_number as i64, data, now],
         );
     }
 }
