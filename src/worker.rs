@@ -183,6 +183,24 @@ fn worker_loop(rx: mpsc::Receiver<WorkerRequest>, tx: mpsc::Sender<WorkerRespons
             }
 
             WorkerRequest::LoadPrCache { repo_paths } => {
+                // Cache-first: return cached PR numbers immediately if available
+                if let Some(c) = &cache {
+                    let mut cached_entries = Vec::new();
+                    for path in &repo_paths {
+                        if let Some(prs) = c.get_pr_numbers(path) {
+                            for (branch, num) in prs {
+                                cached_entries.push((format!("{path}/{branch}"), num));
+                            }
+                        }
+                    }
+                    if !cached_entries.is_empty() {
+                        let _ = tx.send(WorkerResponse::PrCacheLoaded {
+                            entries: cached_entries,
+                        });
+                    }
+                }
+
+                // Then fetch fresh data from gh and update cache
                 let mut entries = Vec::new();
                 for path in &repo_paths {
                     if let Ok(prs) = github::list_prs(path) {
