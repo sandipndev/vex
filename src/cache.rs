@@ -84,7 +84,6 @@ impl PrCache {
     }
 
     /// Get cached PR numbers for a repo. Returns None on miss or error.
-    #[allow(dead_code)]
     pub fn get_pr_numbers(&self, repo_path: &str) -> Option<Vec<(String, u64)>> {
         let cutoff = Self::now() - PR_NUMBER_TTL;
         let mut stmt = self
