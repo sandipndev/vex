@@ -26,7 +26,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 ansi-to-tui = "7"
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
