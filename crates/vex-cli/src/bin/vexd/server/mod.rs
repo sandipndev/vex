@@ -176,6 +176,12 @@ async fn dispatch(
             prompt,
         } => handle_agent_spawn(state, workstream_id, prompt).await,
 
+        Command::AgentSpawnInPlace {
+            workstream_id,
+            tmux_window,
+            prompt,
+        } => handle_agent_spawn_in_place(state, workstream_id, tmux_window, prompt).await,
+
         Command::AgentKill { agent_id } => handle_agent_kill(state, agent_id).await,
 
         Command::AgentList { workstream_id } => {
@@ -556,6 +562,63 @@ async fn handle_agent_spawn(
     Response::AgentSpawned(agent)
 }
 
+async fn handle_agent_spawn_in_place(
+    state: &Arc<AppState>,
+    workstream_id: String,
+    tmux_window: u32,
+    prompt: Option<String>,
+) -> Response {
+    let next_id = {
+        let store = state.repo_store.lock().await;
+        let Some((ri, wi)) = store.ws_indices(&workstream_id) else {
+            return Response::Error(VexProtoError::NotFound);
+        };
+        next_agent_id(&store.repos[ri].workstreams[wi].agents)
+    };
+
+    // Build the shell command the client will exec
+    let agent_cmd = state.user_config.agent_command();
+    let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
+    let exec_cmd = build_send_keys_cmd(&parts, prompt.as_deref().unwrap_or(""));
+
+    let agent = Agent {
+        id: next_id.clone(),
+        workstream_id: workstream_id.clone(),
+        tmux_window,
+        prompt: prompt.clone().unwrap_or_default(),
+        status: AgentStatus::Running,
+        exit_code: None,
+        spawned_at: unix_ts(),
+        exited_at: None,
+    };
+
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi)) = store.ws_indices(&workstream_id) {
+            store.repos[ri].workstreams[wi].agents.push(agent.clone());
+            store.repos[ri].workstreams[wi].status = WorkstreamStatus::Running;
+        }
+        if let Err(e) = store.save() {
+            tracing::error!("persist error after in-place spawn: {e}");
+        }
+    }
+
+    let handle = tokio::spawn(monitor_agent(
+        state.clone(),
+        workstream_id,
+        next_id.clone(),
+        tmux_window,
+    ));
+    state
+        .monitor_handles
+        .lock()
+        .await
+        .insert(next_id.clone(), handle.abort_handle());
+
+    tracing::info!("Registered in-place agent {next_id} at window {tmux_window}");
+    Response::AgentSpawnedInPlace { agent, exec_cmd }
+}
+
 async fn handle_agent_kill(state: &Arc<AppState>, agent_id: String) -> Response {
     let (ws_id, tmux_session, window_index) = {
         let store = state.repo_store.lock().await;
@@ -666,7 +729,11 @@ fn err(msg: String) -> Response {
 }
 
 /// Build `<cmd_parts> '<prompt>'` with single-quote escaping for the prompt.
+/// If prompt is empty the base command is returned without a trailing argument.
 fn build_send_keys_cmd(cmd_parts: &[&str], prompt: &str) -> String {
+    if prompt.is_empty() {
+        return cmd_parts.join(" ");
+    }
     let escaped = prompt.replace('\'', "'\\''");
     format!("{} '{escaped}'", cmd_parts.join(" "))
 }

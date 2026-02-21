@@ -105,6 +105,15 @@ pub enum Command {
         workstream_id: String,
         prompt: String,
     },
+    /// Claim the caller's current tmux window as an agent (in-place conversion).
+    /// The daemon registers the agent and returns the command to exec.
+    AgentSpawnInPlace {
+        workstream_id: String,
+        /// The existing tmux window index (the caller's current pane)
+        tmux_window: u32,
+        /// Optional task description; `None` means run the agent interactively
+        prompt: Option<String>,
+    },
     AgentKill {
         agent_id: String,
     },
@@ -142,6 +151,12 @@ pub enum Response {
 
     // ── Agents ────────────────────────────────────────────────────────────────
     AgentSpawned(Agent),
+    /// Returned by `AgentSpawnInPlace`; client should `exec` the given command.
+    AgentSpawnedInPlace {
+        agent: Agent,
+        /// Shell command string to exec (replaces the caller's current process)
+        exec_cmd: String,
+    },
     AgentKilled,
     AgentList(Vec<Agent>),
 }

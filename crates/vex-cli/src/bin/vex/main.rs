@@ -112,8 +112,9 @@ enum WorkstreamCmd {
     /// Create a new workstream (git worktree + tmux session)
     Create {
         repo_id: String,
+        /// Workstream name; defaults to the branch name if omitted
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         #[arg(long)]
         branch: String,
         #[command(flatten)]
@@ -137,11 +138,15 @@ enum WorkstreamCmd {
 
 #[derive(Subcommand)]
 enum AgentCmd {
-    /// Spawn an agent in a workstream
+    /// Spawn an agent in a workstream.
+    /// If run from inside a vex tmux pane (no workstream_id given), the
+    /// current pane is claimed and the agent command is exec'd in-place.
     Spawn {
-        workstream_id: String,
+        /// Workstream ID. Omit when already inside a vex tmux session.
+        workstream_id: Option<String>,
+        /// Task description. Optional — omit to run the agent interactively.
         #[arg(long)]
-        prompt: String,
+        prompt: Option<String>,
         #[command(flatten)]
         single: Single,
     },
@@ -463,6 +468,7 @@ async fn cmd_workstream(action: WorkstreamCmd) -> Result<()> {
             branch,
             single,
         } => {
+            let name = name.unwrap_or_else(|| branch.clone());
             let (mut conn, _) = open_single_connection(single.connection).await?;
             conn.send(&vex_proto::Command::WorkstreamCreate {
                 repo_id,
@@ -527,19 +533,67 @@ async fn cmd_agent(action: AgentCmd) -> Result<()> {
             prompt,
             single,
         } => {
-            let (mut conn, _) = open_single_connection(single.connection).await?;
-            conn.send(&vex_proto::Command::AgentSpawn {
-                workstream_id,
-                prompt,
-            })
-            .await?;
-            let resp: vex_proto::Response = conn.recv().await?;
-            match resp {
-                vex_proto::Response::AgentSpawned(agent) => {
-                    println!("Spawned {} in tmux window {}", agent.id, agent.tmux_window);
+            if let Some(ws_id) = workstream_id {
+                // Explicit workstream ID → create a new tmux window (standard mode)
+                let (mut conn, _) = open_single_connection(single.connection).await?;
+                conn.send(&vex_proto::Command::AgentSpawn {
+                    workstream_id: ws_id,
+                    prompt: prompt.unwrap_or_default(),
+                })
+                .await?;
+                let resp: vex_proto::Response = conn.recv().await?;
+                match resp {
+                    vex_proto::Response::AgentSpawned(agent) => {
+                        println!("Spawned {} in tmux window {}", agent.id, agent.tmux_window);
+                    }
+                    vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                    other => anyhow::bail!("Unexpected: {other:?}"),
                 }
-                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
-                other => anyhow::bail!("Unexpected: {other:?}"),
+            } else {
+                // No workstream ID → in-place mode: must be inside a vex tmux session
+                if std::env::var("TMUX").is_err() {
+                    anyhow::bail!(
+                        "No workstream_id given and not inside a tmux session.\n\
+                         Either specify a workstream: vex agent spawn <ws_id>\n\
+                         Or run this from inside a vex workstream tmux pane."
+                    );
+                }
+                let session = tmux_display_message("#S").await?;
+                let ws_id = session
+                    .strip_prefix("vex-")
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Current tmux session '{session}' is not a vex workstream \
+                             (expected 'vex-<id>')"
+                        )
+                    })?
+                    .to_string();
+                let window_str = tmux_display_message("#{window_index}").await?;
+                let tmux_window: u32 = window_str
+                    .parse()
+                    .with_context(|| format!("Could not parse window index '{window_str}'"))?;
+
+                let (mut conn, _) = open_single_connection(single.connection).await?;
+                conn.send(&vex_proto::Command::AgentSpawnInPlace {
+                    workstream_id: ws_id,
+                    tmux_window,
+                    prompt: prompt.clone(),
+                })
+                .await?;
+                let resp: vex_proto::Response = conn.recv().await?;
+                match resp {
+                    vex_proto::Response::AgentSpawnedInPlace { agent, exec_cmd } => {
+                        println!("Registered as agent {}. Launching...", agent.id);
+                        use std::os::unix::process::CommandExt;
+                        let e = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&exec_cmd)
+                            .exec();
+                        anyhow::bail!("exec failed: {e}");
+                    }
+                    vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                    other => anyhow::bail!("Unexpected: {other:?}"),
+                }
             }
         }
         AgentCmd::Kill { agent_id, single } => {
@@ -679,6 +733,17 @@ fn default_socket_path() -> String {
         .join("vexd.sock")
         .to_string_lossy()
         .to_string()
+}
+
+async fn tmux_display_message(fmt: &str) -> Result<String> {
+    let out = tokio::process::Command::new("tmux")
+        .arg("display-message")
+        .arg("-p")
+        .arg(fmt)
+        .output()
+        .await
+        .context("Failed to run tmux display-message")?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn read_line() -> Result<String> {
