@@ -104,20 +104,18 @@ fn main() -> Result<()> {
 
         Commands::Stop => do_stop(),
 
-        Commands::Status => {
-            tokio::runtime::Runtime::new()?.block_on(async {
-                let sock = admin_socket_path()?;
-                match local::send_command(&sock, &vex_proto::Command::Status).await? {
-                    vex_proto::Response::DaemonStatus(s) => {
-                        println!("vexd v{}", s.version);
-                        println!("uptime:  {}s", s.uptime_secs);
-                        println!("clients: {}", s.connected_clients);
-                    }
-                    other => println!("{other:?}"),
+        Commands::Status => tokio::runtime::Runtime::new()?.block_on(async {
+            let sock = admin_socket_path()?;
+            match local::send_command(&sock, &vex_proto::Command::Status).await? {
+                vex_proto::Response::DaemonStatus(s) => {
+                    println!("vexd v{}", s.version);
+                    println!("uptime:  {}s", s.uptime_secs);
+                    println!("clients: {}", s.connected_clients);
                 }
-                Ok(())
-            })
-        }
+                other => println!("{other:?}"),
+            }
+            Ok(())
+        }),
 
         Commands::Logs => {
             let log_path = vexd_dir()?.join("vexd.log");
@@ -132,86 +130,78 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Commands::Pair(args) => {
-            tokio::runtime::Runtime::new()?.block_on(async {
-                let sock = admin_socket_path()?;
-                let cmd = vex_proto::Command::PairCreate {
-                    label: args.label.clone(),
-                    expire_secs: args.expire,
-                };
-                match local::send_command(&sock, &cmd).await? {
-                    vex_proto::Response::Pair(p) => {
-                        println!("Token ID    : {}", p.token_id);
-                        println!("Token secret: {}", p.token_secret);
-                        let pairing = p.pairing_string();
-                        println!("\nPairing string:\n  {pairing}");
-                        println!("\nQR code:");
-                        print_qr(&pairing);
-                        Ok(())
-                    }
-                    vex_proto::Response::Error(e) => anyhow::bail!("Error: {e:?}"),
-                    other => anyhow::bail!("Unexpected response: {other:?}"),
+        Commands::Pair(args) => tokio::runtime::Runtime::new()?.block_on(async {
+            let sock = admin_socket_path()?;
+            let cmd = vex_proto::Command::PairCreate {
+                label: args.label.clone(),
+                expire_secs: args.expire,
+            };
+            match local::send_command(&sock, &cmd).await? {
+                vex_proto::Response::Pair(p) => {
+                    println!("Token ID    : {}", p.token_id);
+                    println!("Token secret: {}", p.token_secret);
+                    let pairing = p.pairing_string();
+                    println!("\nPairing string:\n  {pairing}");
+                    println!("\nQR code:");
+                    print_qr(&pairing);
+                    Ok(())
                 }
-            })
-        }
+                vex_proto::Response::Error(e) => anyhow::bail!("Error: {e:?}"),
+                other => anyhow::bail!("Unexpected response: {other:?}"),
+            }
+        }),
 
-        Commands::Tokens { action } => {
-            tokio::runtime::Runtime::new()?.block_on(async {
-                let sock = admin_socket_path()?;
-                match action {
-                    TokensCmd::List => {
-                        match local::send_command(&sock, &vex_proto::Command::PairList).await? {
-                            vex_proto::Response::PairedClients(clients) => {
-                                if clients.is_empty() {
-                                    println!("No paired tokens.");
-                                }
-                                for c in &clients {
-                                    let label = c.label.as_deref().unwrap_or("(no label)");
-                                    let expires = c.expires_at.as_deref().unwrap_or("never");
-                                    let seen = c.last_seen.as_deref().unwrap_or("never");
-                                    println!(
-                                        "{:20} {:<20} expires={} last_seen={}",
-                                        c.token_id, label, expires, seen
-                                    );
-                                }
+        Commands::Tokens { action } => tokio::runtime::Runtime::new()?.block_on(async {
+            let sock = admin_socket_path()?;
+            match action {
+                TokensCmd::List => {
+                    match local::send_command(&sock, &vex_proto::Command::PairList).await? {
+                        vex_proto::Response::PairedClients(clients) => {
+                            if clients.is_empty() {
+                                println!("No paired tokens.");
+                            }
+                            for c in &clients {
+                                let label = c.label.as_deref().unwrap_or("(no label)");
+                                let expires = c.expires_at.as_deref().unwrap_or("never");
+                                let seen = c.last_seen.as_deref().unwrap_or("never");
+                                println!(
+                                    "{:20} {:<20} expires={} last_seen={}",
+                                    c.token_id, label, expires, seen
+                                );
+                            }
+                        }
+                        other => println!("{other:?}"),
+                    }
+                }
+                TokensCmd::Revoke { id, all } => {
+                    if *all {
+                        match local::send_command(&sock, &vex_proto::Command::PairRevokeAll).await?
+                        {
+                            vex_proto::Response::Revoked(n) => {
+                                println!("Revoked {n} token(s).")
                             }
                             other => println!("{other:?}"),
                         }
-                    }
-                    TokensCmd::Revoke { id, all } => {
-                        if *all {
-                            match local::send_command(
-                                &sock,
-                                &vex_proto::Command::PairRevokeAll,
-                            )
-                            .await?
-                            {
-                                vex_proto::Response::Revoked(n) => {
-                                    println!("Revoked {n} token(s).")
-                                }
-                                other => println!("{other:?}"),
-                            }
-                        } else if let Some(token_id) = id {
-                            match local::send_command(
-                                &sock,
-                                &vex_proto::Command::PairRevoke {
-                                    id: token_id.clone(),
-                                },
-                            )
-                            .await?
-                            {
-                                vex_proto::Response::Ok => println!("Revoked {token_id}."),
-                                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
-                                other => println!("{other:?}"),
-                            }
-                        } else {
-                            anyhow::bail!("Provide a token ID or --all");
+                    } else if let Some(token_id) = id {
+                        match local::send_command(
+                            &sock,
+                            &vex_proto::Command::PairRevoke {
+                                id: token_id.clone(),
+                            },
+                        )
+                        .await?
+                        {
+                            vex_proto::Response::Ok => println!("Revoked {token_id}."),
+                            vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                            other => println!("{other:?}"),
                         }
+                    } else {
+                        anyhow::bail!("Provide a token ID or --all");
                     }
                 }
-                Ok(())
-            })
-        }
+            }
+            Ok(())
+        }),
     }
 }
 

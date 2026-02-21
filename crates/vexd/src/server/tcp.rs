@@ -21,8 +21,8 @@ pub fn ensure_tls_certs(
     if cert_path.exists() && key_path.exists() {
         let cert_pem = std::fs::read(&cert_path)?;
         let key_pem = std::fs::read(&key_path)?;
-        let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
-            .collect::<Result<Vec<_>, _>>()?;
+        let certs =
+            rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
         let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
             .ok_or_else(|| anyhow::anyhow!("No private key found in {}", key_path.display()))?;
         Ok((certs, key))
@@ -35,8 +35,8 @@ pub fn ensure_tls_certs(
         std::fs::write(&cert_path, &cert_pem)?;
         std::fs::write(&key_path, &key_pem)?;
 
-        let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
-            .collect::<Result<Vec<_>, _>>()?;
+        let certs =
+            rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
         let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
             .ok_or_else(|| anyhow::anyhow!("Failed to parse generated private key"))?;
         Ok((certs, key))
@@ -133,8 +133,8 @@ pub async fn serve_tcp(
 /// Compute blake3 fingerprint of a PEM cert file (for display/TOFU).
 pub fn cert_fingerprint(tls_dir: &Path) -> anyhow::Result<String> {
     let cert_pem = std::fs::read(tls_dir.join("cert.pem"))?;
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_slice())
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs: Vec<_> =
+        rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
     let first = certs
         .first()
         .ok_or_else(|| anyhow::anyhow!("No cert found"))?;

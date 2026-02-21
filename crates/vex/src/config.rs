@@ -51,8 +51,7 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&path, content)
-            .with_context(|| format!("writing {}", path.display()))
+        std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))
     }
 
     /// Return the effective connection to use given an optional explicit name.
@@ -60,12 +59,9 @@ impl Config {
     pub fn resolve<'a>(&'a self, name: Option<&str>) -> Result<(String, &'a ConnectionEntry)> {
         let key: String = match name {
             Some(n) => n.to_string(),
-            None => self
-                .default_connection
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "No default connection set. Run 'vex connect' or 'vex use <name>'."
-                ))?,
+            None => self.default_connection.clone().ok_or_else(|| {
+                anyhow::anyhow!("No default connection set. Run 'vex connect' or 'vex use <name>'.")
+            })?,
         };
         let entry = self
             .connections

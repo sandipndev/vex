@@ -41,7 +41,10 @@ impl TokenStore {
             let tokens: Vec<Token> = serde_json::from_str(&data)?;
             Ok(Self { path, tokens })
         } else {
-            Ok(Self { path, tokens: vec![] })
+            Ok(Self {
+                path,
+                tokens: vec![],
+            })
         }
     }
 
@@ -74,8 +77,7 @@ impl TokenStore {
         let hash = blake3::hash(&secret_bytes);
         let token_secret_hash = bytes_to_hex(hash.as_bytes());
 
-        let expires_at = expire_secs
-            .map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
+        let expires_at = expire_secs.map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
 
         let token = Token {
             token_id,

@@ -10,7 +10,10 @@ use connect::Connection;
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "vex", about = "Vex client — connects to one or more vexd daemons")]
+#[command(
+    name = "vex",
+    about = "Vex client — connects to one or more vexd daemons"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -89,9 +92,7 @@ async fn cmd_connect(args: ConnectArgs) -> Result<()> {
             tokio::net::UnixStream::connect(&socket_path)
                 .await
                 .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Cannot reach vexd at {socket_path} — is it running? ({e})"
-                    )
+                    anyhow::anyhow!("Cannot reach vexd at {socket_path} — is it running? ({e})")
                 })?;
 
             let entry = ConnectionEntry {
@@ -117,11 +118,9 @@ async fn cmd_connect(args: ConnectArgs) -> Result<()> {
             let pairing = read_line()?;
             let pairing = pairing.trim();
 
-            let (token_id, token_secret) = pairing
-                .split_once(':')
-                .ok_or_else(|| anyhow::anyhow!(
-                    "Invalid pairing token — expected <token_id>:<secret>"
-                ))?;
+            let (token_id, token_secret) = pairing.split_once(':').ok_or_else(|| {
+                anyhow::anyhow!("Invalid pairing token — expected <token_id>:<secret>")
+            })?;
 
             let (_, new_fp) = Connection::tcp_connect(
                 &host,
@@ -201,7 +200,11 @@ fn cmd_list() -> Result<()> {
         let marker = if name == default { "*" } else { " " };
         let target = match entry.transport.as_str() {
             "tcp" => entry.tcp_host.as_deref().unwrap_or("?").to_string(),
-            _ => entry.unix_socket.as_deref().unwrap_or("~/.vexd/vexd.sock").to_string(),
+            _ => entry
+                .unix_socket
+                .as_deref()
+                .unwrap_or("~/.vexd/vexd.sock")
+                .to_string(),
         };
         println!("{marker} {name:<20} {} → {target}", entry.transport);
     }

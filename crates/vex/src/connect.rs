@@ -134,10 +134,7 @@ impl Connection {
             }
             _ => {
                 // unix (default)
-                let path = entry
-                    .unix_socket
-                    .as_deref()
-                    .unwrap_or("/tmp/vexd.sock");
+                let path = entry.unix_socket.as_deref().unwrap_or("/tmp/vexd.sock");
                 let stream = UnixStream::connect(path).await.with_context(|| {
                     format!("Could not connect to vexd at {path} — is vexd running?")
                 })?;
