@@ -113,9 +113,8 @@ async fn handle_key(
             KeyCode::Char('c') => {
                 app.status_msg = None;
                 if app.repos.is_empty() {
-                    app.status_msg = Some(
-                        "No repos registered. Run 'vexd repo register <path>'.".to_string(),
-                    );
+                    app.status_msg =
+                        Some("No repos registered. Run 'vexd repo register <path>'.".to_string());
                 } else if app.repos.len() == 1 {
                     app.create_input.clear();
                     app.mode = Mode::CreateBranchInput {

@@ -118,7 +118,8 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
         let block_area = chunks[chunk_idx];
         chunk_idx += 2; // skip gap chunk (or skip nothing for last)
 
-        let is_create_target = matches!(&app.mode, Mode::CreateSelectRepo { selected } if *selected == ri);
+        let is_create_target =
+            matches!(&app.mode, Mode::CreateSelectRepo { selected } if *selected == ri);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(if is_create_target {
