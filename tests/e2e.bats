@@ -34,7 +34,7 @@ setup() {
     export VEXD_PID
 
     # Wait up to 5 s for the Unix socket AND the TCP port to be ready
-    local sock="$TEST_HOME/.vexd/vexd.sock"
+    local sock="$TEST_HOME/.vex/daemon/vexd.sock"
     local i=0
     while (( i < 50 )); do
         if [[ -S "$sock" ]] \
@@ -257,14 +257,14 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     [[ "$output" == *"vexd v"* ]]
 }
 
-@test "multi: --all queries every saved connection" {
+@test "multi: status queries every saved connection in parallel" {
     vex connect -n local
 
     local pairing
     pairing=$(pair_token)
     vex_pipe "$pairing" connect -n remote --host "localhost:$TCP_PORT"
 
-    run vex status --all
+    run vex status
     [ "$status" -eq 0 ]
     # Output should contain results labelled for both connections
     [[ "$output" == *"[local]"* ]]

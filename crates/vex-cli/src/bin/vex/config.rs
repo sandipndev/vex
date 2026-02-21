@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write, path::PathBuf};
 
+use vex_cli::vex_home::vex_home;
+
 /// All details for a single named connection to a vexd daemon.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ConnectionEntry {
@@ -19,11 +21,9 @@ pub struct ConnectionEntry {
     pub tls_fingerprint: Option<String>,
 }
 
-/// Top-level config stored in `~/.vex/config.toml`.
+/// Top-level config stored in `$VEX_HOME/config.toml`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
-    /// Name of the connection to use when none is specified
-    pub default_connection: Option<String>,
     /// Named connections keyed by user-chosen name
     #[serde(default)]
     pub connections: HashMap<String, ConnectionEntry>,
@@ -31,8 +31,7 @@ pub struct Config {
 
 impl Config {
     pub fn path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("cannot determine home directory")?;
-        Ok(home.join(".vex").join("config.toml"))
+        Ok(vex_home().join("config.toml"))
     }
 
     pub fn load() -> Result<Self> {
@@ -65,43 +64,18 @@ impl Config {
             .with_context(|| format!("writing {}", path.display()))
     }
 
-    /// Return the effective connection to use given an optional explicit name.
-    /// Errors if no connection is found.
-    pub fn resolve<'a>(&'a self, name: Option<&str>) -> Result<(String, &'a ConnectionEntry)> {
-        let key: String = match name {
-            Some(n) => n.to_string(),
-            None => self.default_connection.clone().ok_or_else(|| {
-                anyhow::anyhow!("No default connection set. Run 'vex connect' or 'vex use <name>'.")
-            })?,
-        };
-        let entry = self
-            .connections
-            .get(&key)
-            .ok_or_else(|| anyhow::anyhow!("Unknown connection '{key}'"))?;
-        Ok((key, entry))
-    }
-
-    /// Add or replace a named connection and optionally set it as the default.
-    pub fn upsert(&mut self, name: String, entry: ConnectionEntry, set_default: bool) {
-        if set_default || self.default_connection.is_none() {
-            self.default_connection = Some(name.clone());
-        }
+    /// Add or replace a named connection.
+    pub fn upsert(&mut self, name: String, entry: ConnectionEntry) {
         self.connections.insert(name, entry);
     }
 
-    /// Remove a named connection. If it was the default, clear the default.
+    /// Remove a named connection. Returns true if it existed.
     pub fn remove(&mut self, name: &str) -> bool {
-        let removed = self.connections.remove(name).is_some();
-        if removed && self.default_connection.as_deref() == Some(name) {
-            // Pick another one as default, or clear
-            self.default_connection = self.connections.keys().next().cloned();
-        }
-        removed
+        self.connections.remove(name).is_some()
     }
 
     /// Remove all connections.
     pub fn clear_all(&mut self) {
         self.connections.clear();
-        self.default_connection = None;
     }
 }
