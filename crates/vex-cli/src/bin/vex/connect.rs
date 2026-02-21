@@ -1,3 +1,5 @@
+use vex_cli as vex_proto;
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};

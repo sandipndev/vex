@@ -1,3 +1,5 @@
+use vex_cli as vex_proto;
+
 mod auth;
 mod local;
 mod server;

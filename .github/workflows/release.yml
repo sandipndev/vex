@@ -30,10 +30,7 @@ jobs:
       - name: Set release version in Cargo.toml
         run: |
           version="${{ steps.version.outputs.version }}"
-          # Update [workspace.package] version
           sed -i "s/^version = .*/version = \"${version}\"/" Cargo.toml
-          # Update vex-proto version in [workspace.dependencies] to match
-          sed -i "s|vex-proto = { path = \"crates/vex-proto\", version = \"[^\"]*\" }|vex-proto = { path = \"crates/vex-proto\", version = \"${version}\" }|" Cargo.toml
           cargo update --workspace
 
       - name: Create tag
@@ -97,7 +94,7 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.artifact }}.tar.gz vex
+          tar czf ../../../${{ matrix.artifact }}.tar.gz vex vexd
           cd ../../..
 
       - uses: actions/upload-artifact@v6
@@ -141,7 +138,7 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p vex-proto
+        run: cargo publish -p vex-cli
 
   bump-version:
     name: Bump version on meta/release

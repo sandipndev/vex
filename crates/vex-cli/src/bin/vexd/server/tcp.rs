@@ -1,3 +1,5 @@
+use vex_cli as vex_proto;
+
 use std::{net::SocketAddr, path::Path, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;

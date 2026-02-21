@@ -1,3 +1,5 @@
+use vex_cli as vex_proto;
+
 use std::{path::PathBuf, sync::Arc};
 use tokio::net::UnixListener;
 use vex_proto::Transport;

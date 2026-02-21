@@ -1,3 +1,5 @@
+use vex_cli as vex_proto;
+
 use std::path::Path;
 use vex_proto::{Command, Response};
 

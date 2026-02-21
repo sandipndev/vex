@@ -1,3 +1,5 @@
+use vex_cli as vex_proto;
+
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use vex_proto::{Command, Response, Transport, VexProtoError};
