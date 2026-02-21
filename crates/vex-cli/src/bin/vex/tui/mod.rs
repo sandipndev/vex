@@ -110,6 +110,22 @@ async fn handle_key(
                     app.status_msg = None;
                 }
             }
+            KeyCode::Char('c') => {
+                app.status_msg = None;
+                if app.repos.is_empty() {
+                    app.status_msg = Some(
+                        "No repos registered. Run 'vexd repo register <path>'.".to_string(),
+                    );
+                } else if app.repos.len() == 1 {
+                    app.create_input.clear();
+                    app.mode = Mode::CreateBranchInput {
+                        repo_id: app.repos[0].id.clone(),
+                        repo_name: app.repos[0].name.clone(),
+                    };
+                } else {
+                    app.mode = Mode::CreateSelectRepo { selected: 0 };
+                }
+            }
             KeyCode::Char('d') => {
                 if app.selected().is_some() {
                     app.mode = Mode::ConfirmDelete;
@@ -207,6 +223,71 @@ async fn handle_key(
             }
             _ => {}
         },
+
+        Mode::CreateSelectRepo { selected } => {
+            let n_repos = app.repos.len();
+            let sel = *selected;
+            match key {
+                KeyCode::Esc => app.mode = Mode::Normal,
+                KeyCode::Up => {
+                    if let Mode::CreateSelectRepo { selected } = &mut app.mode {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    if let Mode::CreateSelectRepo { selected } = &mut app.mode {
+                        if *selected + 1 < n_repos {
+                            *selected += 1;
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    let repo = app.repos[sel].clone();
+                    app.create_input.clear();
+                    app.mode = Mode::CreateBranchInput {
+                        repo_id: repo.id,
+                        repo_name: repo.name,
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        Mode::CreateBranchInput { repo_id, .. } => {
+            let repo_id = repo_id.clone();
+            match key {
+                KeyCode::Esc => {
+                    app.mode = Mode::Normal;
+                    app.create_input.clear();
+                }
+                KeyCode::Enter => {
+                    let branch = app.create_input.trim().to_string();
+                    if branch.is_empty() {
+                        return Ok(false);
+                    }
+                    app.mode = Mode::Normal;
+                    app.create_input.clear();
+                    match create_workstream(conn, repo_id, branch.clone()).await {
+                        Ok(ws) => {
+                            app.status_msg = Some(format!("Created workstream '{}'", ws.name));
+                            refresh_repos(conn, app).await;
+                        }
+                        Err(e) => {
+                            app.status_msg = Some(format!("Error: {e}"));
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    app.create_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.create_input.push(c);
+                }
+                _ => {}
+            }
+        }
     }
 
     Ok(false)
@@ -273,6 +354,25 @@ async fn spawn_agent(
     let resp: Response = conn.recv().await?;
     match resp {
         Response::AgentSpawned(agent) => Ok(agent),
+        Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+async fn create_workstream(
+    conn: &mut Connection,
+    repo_id: String,
+    branch: String,
+) -> Result<vex_cli::Workstream> {
+    conn.send(&Command::WorkstreamCreate {
+        repo_id,
+        name: branch.clone(),
+        branch,
+    })
+    .await?;
+    let resp: Response = conn.recv().await?;
+    match resp {
+        Response::WorkstreamCreated(ws) => Ok(ws),
         Response::Error(e) => anyhow::bail!("{e:?}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }

@@ -17,7 +17,10 @@ pub fn render(f: &mut Frame, app: &App) {
 
     // Split into header | body | footer
     let footer_height = match &app.mode {
-        Mode::SpawnInput | Mode::ConfirmAttach { .. } => 3,
+        Mode::SpawnInput
+        | Mode::ConfirmAttach { .. }
+        | Mode::CreateSelectRepo { .. }
+        | Mode::CreateBranchInput { .. } => 3,
         _ => 1,
     };
     let chunks = Layout::default()
@@ -115,8 +118,16 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
         let block_area = chunks[chunk_idx];
         chunk_idx += 2; // skip gap chunk (or skip nothing for last)
 
+        let is_create_target = matches!(&app.mode, Mode::CreateSelectRepo { selected } if *selected == ri);
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(if is_create_target {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            })
             .title(format!(" {} ", repo.name));
         let inner = block.inner(block_area);
         f.render_widget(block, block_area);
@@ -199,7 +210,7 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let content = match &app.mode {
         Mode::Normal => {
-            let keys = "↑↓ navigate   enter attach   a spawn agent   s shell   d delete   r refresh   q quit";
+            let keys = "↑↓ navigate   enter attach   a agent   c create   s shell   d delete   r refresh   q quit";
             let line = if let Some(msg) = &app.status_msg {
                 Line::from(vec![
                     Span::styled(msg.clone(), Style::default().fg(Color::Yellow)),
@@ -243,6 +254,35 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray),
             ),
         ])),
+        Mode::CreateSelectRepo { selected } => {
+            let repo_name = app
+                .repos
+                .get(*selected)
+                .map(|r| r.name.as_str())
+                .unwrap_or("?");
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("Create workstream in: {repo_name}"),
+                    Style::default(),
+                )),
+                Line::from(Span::styled(
+                    "↑↓ select repo   enter confirm   esc cancel",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            Paragraph::new(lines)
+        }
+        Mode::CreateBranchInput { repo_name, .. } => {
+            let prompt = format!("Branch [{repo_name}]: {}_", app.create_input);
+            let lines = vec![
+                Line::from(Span::styled(prompt, Style::default())),
+                Line::from(Span::styled(
+                    "enter to create   esc to cancel",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            Paragraph::new(lines)
+        }
     };
 
     f.render_widget(content, area);

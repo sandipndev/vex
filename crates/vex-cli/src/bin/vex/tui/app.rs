@@ -16,6 +16,15 @@ pub enum Mode {
     },
     /// User pressed `d` — waiting for confirmation
     ConfirmDelete,
+    /// User pressed `c` with multiple repos — picking which repo to create in
+    CreateSelectRepo {
+        selected: usize,
+    },
+    /// User is typing a branch name for the new workstream
+    CreateBranchInput {
+        repo_id: String,
+        repo_name: String,
+    },
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -35,6 +44,8 @@ pub struct App {
     pub mode: Mode,
     /// Text being typed in SpawnInput mode
     pub spawn_input: String,
+    /// Text being typed in CreateBranchInput mode
+    pub create_input: String,
     /// One-line status / error message shown at bottom
     pub status_msg: Option<String>,
 }
@@ -49,6 +60,7 @@ impl App {
             last_refresh: Instant::now(),
             mode: Mode::Normal,
             spawn_input: String::new(),
+            create_input: String::new(),
             status_msg: None,
         }
     }
