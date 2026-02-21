@@ -1,3 +1,10 @@
 [workspace]
 members = ["crates/vex-proto", "crates/vexd", "crates/vex"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+vex-proto = { path = "crates/vex-proto", version = "0.1.0" }
