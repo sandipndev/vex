@@ -230,17 +230,17 @@ async fn handle_key(
             match key {
                 KeyCode::Esc => app.mode = Mode::Normal,
                 KeyCode::Up => {
-                    if let Mode::CreateSelectRepo { selected } = &mut app.mode {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+                    if let Mode::CreateSelectRepo { selected } = &mut app.mode
+                        && *selected > 0
+                    {
+                        *selected -= 1;
                     }
                 }
                 KeyCode::Down => {
-                    if let Mode::CreateSelectRepo { selected } = &mut app.mode {
-                        if *selected + 1 < n_repos {
-                            *selected += 1;
-                        }
+                    if let Mode::CreateSelectRepo { selected } = &mut app.mode
+                        && *selected + 1 < n_repos
+                    {
+                        *selected += 1;
                     }
                 }
                 KeyCode::Enter => {
