@@ -1,0 +1,29 @@
+[package]
+name = "vexd"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "vexd"
+path = "src/main.rs"
+
+[dependencies]
+vex-proto = { path = "../vex-proto" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+blake3 = "1"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+tokio-rustls = "0.26"
+qrcode = "0.14"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+daemonize = "0.5"
