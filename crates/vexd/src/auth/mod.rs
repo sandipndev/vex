@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use subtle::ConstantTimeEq;
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -99,8 +100,8 @@ impl TokenStore {
             Ok(b) => b,
             Err(_) => return false,
         };
-        let hash = blake3::hash(&secret_bytes);
-        let presented_hash = bytes_to_hex(hash.as_bytes());
+        // Compute the blake3 hash of the presented secret as raw bytes.
+        let presented_hash: [u8; 32] = *blake3::hash(&secret_bytes).as_bytes();
 
         if let Some(token) = self.tokens.iter_mut().find(|t| t.token_id == token_id) {
             if let Some(expires_at) = token.expires_at
@@ -108,7 +109,13 @@ impl TokenStore {
             {
                 return false;
             }
-            if token.token_secret_hash == presented_hash {
+            // Decode the stored hex hash and compare in constant time to
+            // prevent timing-based secret oracle attacks.
+            let stored_bytes = match hex_to_bytes(&token.token_secret_hash) {
+                Ok(b) if b.len() == 32 => b,
+                _ => return false,
+            };
+            if bool::from(presented_hash.ct_eq(&stored_bytes)) {
                 token.last_seen = Some(Utc::now());
                 let _ = self.save();
                 return true;

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, io::Write, path::PathBuf};
 
 /// All details for a single named connection to a vexd daemon.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -51,7 +51,18 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))
+        // Open with restricted permissions so the file (which contains the
+        // plaintext token secret) is never world-readable.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&path)
+            .and_then(|mut f| f.write_all(content.as_bytes()))
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     /// Return the effective connection to use given an optional explicit name.
