@@ -1,36 +1,11 @@
 [package]
-name = "vex-cli"
-version = "0.0.0-dev"
+name = "vex"
+version = "0.1.0"
 edition = "2024"
-description = "Parallel workstream manager using git worktrees and tmux"
+description = "Parallel, asynchronous, multi-agent work stream orchestration"
 license = "MIT"
 repository = "https://github.com/sandipndev/vex"
-homepage = "https://github.com/sandipndev/vex"
-keywords = ["tmux", "git", "worktree", "workflow", "cli"]
-categories = ["command-line-utilities", "development-tools"]
-readme = "README.md"
 
 [[bin]]
 name = "vex"
 path = "src/main.rs"
-
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
-thiserror = "2"
-dirs = "6"
-chrono = { version = "0.4", features = ["serde"] }
-ratatui = "0.30"
-crossterm = "0.29"
-ansi-to-tui = "8"
-serde_json = "1"
-rusqlite = { version = "0.38", features = ["bundled"] }
-
-[build-dependencies]
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-
-[dev-dependencies]
-tempfile = "3"
