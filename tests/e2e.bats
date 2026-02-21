@@ -257,14 +257,14 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     [[ "$output" == *"vexd v"* ]]
 }
 
-@test "multi: --all queries every saved connection" {
+@test "multi: status queries every saved connection in parallel" {
     vex connect -n local
 
     local pairing
     pairing=$(pair_token)
     vex_pipe "$pairing" connect -n remote --host "localhost:$TCP_PORT"
 
-    run vex status --all
+    run vex status
     [ "$status" -eq 0 ]
     # Output should contain results labelled for both connections
     [[ "$output" == *"[local]"* ]]
