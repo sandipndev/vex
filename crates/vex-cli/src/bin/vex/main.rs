@@ -361,7 +361,7 @@ async fn cmd_with_connections(filter: Filter, cmd: DaemonCmd) -> Result<()> {
         match output {
             Ok(line) => println!("[{name}] {line}"),
             Err(e) => {
-                eprintln!("[{name}] error: {e}");
+                println!("[{name}] error: {e:#}");
                 any_error = true;
             }
         }
