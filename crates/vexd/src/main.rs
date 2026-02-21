@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use daemonize::Daemonize;
 use qrcode::QrCode;
 
@@ -41,6 +41,11 @@ enum Commands {
     Tokens {
         #[command(subcommand)]
         action: TokensCmd,
+    },
+    /// Print shell completion script
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
     },
 }
 
@@ -150,6 +155,11 @@ fn main() -> Result<()> {
                 other => anyhow::bail!("Unexpected response: {other:?}"),
             }
         }),
+
+        Commands::Completions { shell } => {
+            clap_complete::generate(*shell, &mut Cli::command(), "vexd", &mut std::io::stdout());
+            Ok(())
+        }
 
         Commands::Tokens { action } => tokio::runtime::Runtime::new()?.block_on(async {
             let sock = admin_socket_path()?;

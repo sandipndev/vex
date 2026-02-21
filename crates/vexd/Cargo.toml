@@ -21,6 +21,7 @@ tokio-rustls = "0.26"
 qrcode = "0.14"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"

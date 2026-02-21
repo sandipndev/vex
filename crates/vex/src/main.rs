@@ -2,7 +2,7 @@ mod config;
 mod connect;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use config::{Config, ConnectionEntry};
 use connect::Connection;
@@ -36,6 +36,11 @@ enum Commands {
     Status(ConnectionFlag),
     /// Show who you are connected as
     Whoami(ConnectionFlag),
+    /// Print shell completion script
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Args)]
@@ -78,6 +83,10 @@ async fn main() -> Result<()> {
         Commands::List => cmd_list(),
         Commands::Status(flag) => cmd_with_connections(flag, DaemonCmd::Status).await,
         Commands::Whoami(flag) => cmd_with_connections(flag, DaemonCmd::Whoami).await,
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
 

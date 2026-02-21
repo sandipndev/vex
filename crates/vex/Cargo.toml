@@ -16,6 +16,7 @@ rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 toml = "0.8"
 dirs = "5"
 anyhow = "1"
