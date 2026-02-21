@@ -2,6 +2,7 @@ use vex_cli as vex_proto;
 
 mod config;
 mod connect;
+mod tui;
 
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -9,6 +10,7 @@ use tokio::task::JoinSet;
 
 use config::{Config, ConnectionEntry};
 use connect::Connection;
+use vex_cli::vex_home::vex_home;
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -18,8 +20,9 @@ use connect::Connection;
     about = "Vex client — connects to one or more vexd daemons"
 )]
 struct Cli {
+    /// If omitted, opens the interactive TUI
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -34,6 +37,21 @@ enum Commands {
     Status(Filter),
     /// Show who you are connected as for all connections (or one with -c)
     Whoami(Filter),
+    /// Repository commands
+    Repo {
+        #[command(subcommand)]
+        action: RepoCmd,
+    },
+    /// Workstream commands
+    Workstream {
+        #[command(subcommand)]
+        action: WorkstreamCmd,
+    },
+    /// Agent commands
+    Agent {
+        #[command(subcommand)]
+        action: AgentCmd,
+    },
     /// Print shell completion script
     Completions {
         /// Shell to generate completions for
@@ -41,31 +59,104 @@ enum Commands {
     },
 }
 
+// ── Subcommand structs ────────────────────────────────────────────────────────
+
 #[derive(Args)]
 struct ConnectArgs {
-    /// Name for this connection
     #[arg(long, short = 'n', default_value = "default")]
     name: String,
-    /// TCP host:port of a remote daemon (omit to use local Unix socket)
     #[arg(long)]
     host: Option<String>,
 }
 
 #[derive(Args)]
 struct DisconnectArgs {
-    /// Connection name to remove
     #[arg(long, short = 'c')]
     connection: Option<String>,
-    /// Remove all saved connections
     #[arg(long)]
     all: bool,
 }
 
 #[derive(Args)]
 struct Filter {
-    /// Limit to a single named connection (default: run against all)
     #[arg(long, short = 'c')]
     connection: Option<String>,
+}
+
+/// Shared single-connection selector for repo/workstream/agent commands.
+#[derive(Args)]
+struct Single {
+    /// Named connection to use (default: local Unix socket, then "default")
+    #[arg(long, short = 'c')]
+    connection: Option<String>,
+}
+
+// ── Repo subcommands ──────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// List registered repositories
+    List(Single),
+    /// Unregister a repository
+    Unregister {
+        repo_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+}
+
+// ── Workstream subcommands ────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum WorkstreamCmd {
+    /// Create a new workstream (git worktree + tmux session)
+    Create {
+        repo_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        branch: String,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// List workstreams (optionally filtered to one repo)
+    List {
+        repo_id: Option<String>,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// Delete a workstream and its tmux session
+    Delete {
+        workstream_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+}
+
+// ── Agent subcommands ─────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Spawn an agent in a workstream
+    Spawn {
+        workstream_id: String,
+        #[arg(long)]
+        prompt: String,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// Kill a running agent
+    Kill {
+        agent_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// List agents in a workstream
+    List {
+        workstream_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -79,19 +170,27 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Connect(args) => cmd_connect(args).await,
-        Commands::Disconnect(args) => cmd_disconnect(args),
-        Commands::List => cmd_list(),
-        Commands::Status(filter) => cmd_with_connections(filter, DaemonCmd::Status).await,
-        Commands::Whoami(filter) => cmd_with_connections(filter, DaemonCmd::Whoami).await,
-        Commands::Completions { shell } => {
+        None => {
+            // No subcommand → open TUI
+            let (conn, label) = open_single_connection(None).await?;
+            tui::run(conn, label).await
+        }
+        Some(Commands::Connect(args)) => cmd_connect(args).await,
+        Some(Commands::Disconnect(args)) => cmd_disconnect(args),
+        Some(Commands::List) => cmd_list(),
+        Some(Commands::Status(filter)) => cmd_with_connections(filter, DaemonCmd::Status).await,
+        Some(Commands::Whoami(filter)) => cmd_with_connections(filter, DaemonCmd::Whoami).await,
+        Some(Commands::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
             Ok(())
         }
+        Some(Commands::Repo { action }) => cmd_repo(action).await,
+        Some(Commands::Workstream { action }) => cmd_workstream(action).await,
+        Some(Commands::Agent { action }) => cmd_agent(action).await,
     }
 }
 
-// ── Command implementations ──────────────────────────────────────────────────
+// ── Existing command implementations ─────────────────────────────────────────
 
 async fn cmd_connect(args: ConnectArgs) -> Result<()> {
     let mut cfg = Config::load()?;
@@ -185,7 +284,7 @@ fn cmd_list() -> Result<()> {
             _ => entry
                 .unix_socket
                 .as_deref()
-                .unwrap_or("~/.vexd/vexd.sock")
+                .unwrap_or("~/.vex/daemon/vexd.sock")
                 .to_string(),
         };
         println!("{name:<20} {} → {target}", entry.transport);
@@ -204,7 +303,6 @@ enum DaemonCmd {
 async fn cmd_with_connections(filter: Filter, cmd: DaemonCmd) -> Result<()> {
     let mut cfg = Config::load()?;
 
-    // Determine which connections to target
     let names: Vec<String> = match filter.connection {
         Some(ref name) => {
             if !cfg.connections.contains_key(name.as_str()) {
@@ -223,7 +321,6 @@ async fn cmd_with_connections(filter: Filter, cmd: DaemonCmd) -> Result<()> {
         }
     };
 
-    // Clone entries for parallel tasks (we'll merge TOFU updates back after)
     let tasks: Vec<(String, ConnectionEntry)> = names
         .iter()
         .map(|n| (n.clone(), cfg.connections[n].clone()))
@@ -246,7 +343,6 @@ async fn cmd_with_connections(filter: Filter, cmd: DaemonCmd) -> Result<()> {
         });
     }
 
-    // Collect results; sort by name for stable output
     let mut results: Vec<(String, Option<String>, Result<String>)> = Vec::new();
     while let Some(res) = set.join_next().await {
         results.push(res.context("task panicked")?);
@@ -316,13 +412,273 @@ async fn run_whoami(conn: &mut Connection) -> Result<String> {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Repo commands ─────────────────────────────────────────────────────────────
+
+async fn cmd_repo(action: RepoCmd) -> Result<()> {
+    match action {
+        RepoCmd::List(single) => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::RepoList).await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::RepoList(repos) => {
+                    if repos.is_empty() {
+                        println!("No repositories registered.");
+                        return Ok(());
+                    }
+                    println!("{:<14} {:<20} PATH", "ID", "NAME");
+                    for repo in &repos {
+                        println!("{:<14} {:<20} {}", repo.id, repo.name, repo.path);
+                    }
+                }
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        RepoCmd::Unregister { repo_id, single } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::RepoUnregister {
+                repo_id: repo_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::RepoUnregistered => {
+                    println!("Unregistered {repo_id}.");
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Workstream commands ───────────────────────────────────────────────────────
+
+async fn cmd_workstream(action: WorkstreamCmd) -> Result<()> {
+    match action {
+        WorkstreamCmd::Create {
+            repo_id,
+            name,
+            branch,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::WorkstreamCreate {
+                repo_id,
+                name,
+                branch,
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::WorkstreamCreated(ws) => {
+                    println!("Created workstream {} ({})", ws.id, ws.name);
+                    println!("  branch:  {}", ws.branch);
+                    println!("  session: {}", ws.tmux_session);
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        WorkstreamCmd::List { repo_id, single } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::WorkstreamList {
+                repo_id: repo_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::WorkstreamList(repos) => {
+                    print_workstream_table(&repos);
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        WorkstreamCmd::Delete {
+            workstream_id,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::WorkstreamDelete {
+                workstream_id: workstream_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::WorkstreamDeleted => {
+                    println!("Deleted workstream {workstream_id}.");
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Agent commands ────────────────────────────────────────────────────────────
+
+async fn cmd_agent(action: AgentCmd) -> Result<()> {
+    match action {
+        AgentCmd::Spawn {
+            workstream_id,
+            prompt,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::AgentSpawn {
+                workstream_id,
+                prompt,
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::AgentSpawned(agent) => {
+                    println!("Spawned {} in tmux window {}", agent.id, agent.tmux_window);
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        AgentCmd::Kill { agent_id, single } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::AgentKill {
+                agent_id: agent_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::AgentKilled => {
+                    println!("Killed agent {agent_id}.");
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        AgentCmd::List {
+            workstream_id,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::AgentList {
+                workstream_id: workstream_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::AgentList(agents) => {
+                    if agents.is_empty() {
+                        println!("No agents in {workstream_id}.");
+                        return Ok(());
+                    }
+                    println!("{:<14} {:<35} {:<10} SPAWNED", "ID", "PROMPT", "STATUS");
+                    for a in &agents {
+                        let status = format!("{:?}", a.status);
+                        let prompt = if a.prompt.len() > 33 {
+                            format!("{}…", &a.prompt[..32])
+                        } else {
+                            a.prompt.clone()
+                        };
+                        let ago = tui::app::format_ago(a.spawned_at);
+                        println!("{:<14} {:<35} {:<10} {ago}", a.id, prompt, status);
+                    }
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Tabular helpers ───────────────────────────────────────────────────────────
+
+fn print_workstream_table(repos: &[vex_proto::Repository]) {
+    let total: usize = repos.iter().map(|r| r.workstreams.len()).sum();
+    if total == 0 {
+        println!("No workstreams. Run 'vex workstream create' to add one.");
+        return;
+    }
+
+    println!(
+        "{:<12} {:<12} {:<20} {:<20} {:<10} {:<8} SHELL",
+        "REPO", "ID", "NAME", "BRANCH", "STATUS", "AGENTS"
+    );
+    for repo in repos {
+        for ws in &repo.workstreams {
+            let running: usize = ws
+                .agents
+                .iter()
+                .filter(|a| a.status == vex_proto::AgentStatus::Running)
+                .count();
+            let status = format!("{:?}", ws.status);
+            println!(
+                "{:<12} {:<12} {:<20} {:<20} {:<10} {:<8} ✓",
+                repo.name, ws.id, ws.name, ws.branch, status, running
+            );
+        }
+    }
+}
+
+// ── Connection helpers ────────────────────────────────────────────────────────
+
+/// Open a single connection: try Unix socket first, then named/default config.
+/// Returns `(Connection, display_label)`.
+async fn open_single_connection(name: Option<String>) -> Result<(Connection, String)> {
+    // If a name was given, use config
+    if let Some(ref n) = name {
+        let mut cfg = Config::load()?;
+        let entry = cfg
+            .connections
+            .get_mut(n)
+            .with_context(|| format!("Unknown connection '{n}'. Run 'vex list'."))?;
+        let conn = Connection::from_entry(entry).await?;
+        return Ok((conn, n.clone()));
+    }
+
+    // Try local Unix socket
+    let socket_path = default_socket_path();
+    if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+        let mut entry = ConnectionEntry {
+            transport: "unix".to_string(),
+            unix_socket: Some(socket_path),
+            ..Default::default()
+        };
+        let conn = Connection::from_entry(&mut entry).await?;
+        return Ok((conn, "localhost".to_string()));
+    }
+
+    // Fall back to configured connections
+    let mut cfg = Config::load()?;
+    if cfg.connections.is_empty() {
+        anyhow::bail!(
+            "No vexd connection available.\n\
+             Start the daemon with 'vexd start', or add a connection with 'vex connect'."
+        );
+    }
+
+    // Prefer "default", then any
+    let name = if cfg.connections.contains_key("default") {
+        "default".to_string()
+    } else {
+        cfg.connections.keys().next().cloned().unwrap()
+    };
+
+    let entry = cfg.connections.get_mut(&name).unwrap();
+    let conn = Connection::from_entry(entry).await?;
+    Ok((conn, name))
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn default_socket_path() -> String {
-    dirs::home_dir()
-        .map(|h| h.join(".vexd").join("vexd.sock"))
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/tmp/vexd.sock".to_string())
+    vex_home()
+        .join("daemon")
+        .join("vexd.sock")
+        .to_string_lossy()
+        .to_string()
 }
 
 fn read_line() -> Result<String> {

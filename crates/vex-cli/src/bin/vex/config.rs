@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write, path::PathBuf};
 
+use vex_cli::vex_home::vex_home;
+
 /// All details for a single named connection to a vexd daemon.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ConnectionEntry {
@@ -19,7 +21,7 @@ pub struct ConnectionEntry {
     pub tls_fingerprint: Option<String>,
 }
 
-/// Top-level config stored in `~/.vex/config.toml`.
+/// Top-level config stored in `$VEX_HOME/config.toml`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Named connections keyed by user-chosen name
@@ -29,8 +31,7 @@ pub struct Config {
 
 impl Config {
     pub fn path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("cannot determine home directory")?;
-        Ok(home.join(".vex").join("config.toml"))
+        Ok(vex_home().join("config.toml"))
     }
 
     pub fn load() -> Result<Self> {

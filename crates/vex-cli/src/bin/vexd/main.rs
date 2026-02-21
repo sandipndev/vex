@@ -2,10 +2,12 @@ use vex_cli as vex_proto;
 
 mod auth;
 mod local;
+mod repo_store;
 mod server;
 mod state;
 
 use std::{
+    collections::HashSet,
     fs::{File, OpenOptions},
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -15,6 +17,10 @@ use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use daemonize::Daemonize;
 use qrcode::QrCode;
+
+use repo_store::RepoStore;
+use vex_cli::user_config::UserConfig;
+use vex_cli::vex_home::vex_home;
 
 // ── CLI definition ─────────────────────────────────────────────────────────
 
@@ -43,6 +49,11 @@ enum Commands {
     Tokens {
         #[command(subcommand)]
         action: TokensCmd,
+    },
+    /// Repository management
+    Repo {
+        #[command(subcommand)]
+        action: RepoCmd,
     },
     /// Print shell completion script
     Completions {
@@ -82,15 +93,23 @@ enum TokensCmd {
     },
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// Register a git repository (daemon must be running)
+    Register {
+        /// Path to the repository (can be relative; `.` works)
+        path: PathBuf,
+    },
+}
 
-fn vexd_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("cannot determine home directory")?;
-    Ok(home.join(".vexd"))
+// ── Path helpers ─────────────────────────────────────────────────────────────
+
+fn daemon_dir() -> Result<PathBuf> {
+    Ok(vex_home().join("daemon"))
 }
 
 fn admin_socket_path() -> Result<PathBuf> {
-    Ok(vexd_dir()?.join("vexd.sock"))
+    Ok(daemon_dir()?.join("vexd.sock"))
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -125,7 +144,7 @@ fn main() -> Result<()> {
         }),
 
         Commands::Logs => {
-            let log_path = vexd_dir()?.join("vexd.log");
+            let log_path = daemon_dir()?.join("vexd.log");
             if !log_path.exists() {
                 anyhow::bail!("Log file not found: {}", log_path.display());
             }
@@ -214,27 +233,52 @@ fn main() -> Result<()> {
             }
             Ok(())
         }),
+
+        Commands::Repo { action } => tokio::runtime::Runtime::new()?.block_on(async {
+            let sock = admin_socket_path()?;
+            match action {
+                RepoCmd::Register { path } => {
+                    let abs = path
+                        .canonicalize()
+                        .with_context(|| format!("cannot resolve '{}'", path.display()))?;
+                    let path_str = abs.to_string_lossy().to_string();
+                    match local::send_command(
+                        &sock,
+                        &vex_proto::Command::RepoRegister { path: path_str },
+                    )
+                    .await?
+                    {
+                        vex_proto::Response::RepoRegistered(repo) => {
+                            println!("Registered {} ({}) at {}", repo.id, repo.name, repo.path);
+                        }
+                        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                        other => anyhow::bail!("Unexpected: {other:?}"),
+                    }
+                }
+            }
+            Ok(())
+        }),
     }
 }
 
 // ── Daemon launch (shared by Start and Restart) ──────────────────────────────
 
 fn setup_and_launch(args: &StartArgs) -> Result<()> {
-    let vexd_dir = vexd_dir()?;
-    std::fs::create_dir_all(&vexd_dir)?;
-    std::fs::create_dir_all(vexd_dir.join("tls"))?;
+    let daemon_dir = daemon_dir()?;
+    std::fs::create_dir_all(&daemon_dir)?;
+    std::fs::create_dir_all(daemon_dir.join("tls"))?;
 
     if args.daemon {
-        let log = open_log(&vexd_dir)?;
+        let log = open_log(&daemon_dir)?;
         Daemonize::new()
-            .pid_file(vexd_dir.join("vexd.pid"))
+            .pid_file(daemon_dir.join("vexd.pid"))
             .stdout(log.try_clone()?)
             .stderr(log)
             .start()
             .context("daemonize failed")?;
         // We are now in the daemon child process.
     } else {
-        std::fs::write(vexd_dir.join("vexd.pid"), std::process::id().to_string())
+        std::fs::write(daemon_dir.join("vexd.pid"), std::process::id().to_string())
             .context("writing PID file")?;
     }
 
@@ -242,12 +286,12 @@ fn setup_and_launch(args: &StartArgs) -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;
 
-    tokio::runtime::Runtime::new()?.block_on(run_daemon(vexd_dir))
+    tokio::runtime::Runtime::new()?.block_on(run_daemon(vex_home()))
 }
 
 // ── Daemon server loop ──────────────────────────────────────────────────────
 
-async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
+async fn run_daemon(vex_home: PathBuf) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -255,8 +299,37 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
         )
         .init();
 
-    let token_store = auth::TokenStore::load(vexd_dir.join("tokens.json"))?;
-    let state = state::AppState::new(vexd_dir.clone(), token_store);
+    let daemon_dir = vex_home.join("daemon");
+    std::fs::create_dir_all(&daemon_dir)?;
+
+    let user_config = UserConfig::load(&vex_home);
+    let token_store = auth::TokenStore::load(daemon_dir.join("tokens.json"))?;
+    let mut repo_store = RepoStore::load(daemon_dir.join("repos.json"))?;
+
+    // Reconcile: detect sessions that died while daemon was down
+    let alive = list_tmux_sessions().await;
+    let running_agents = repo_store.reconcile(&alive);
+    repo_store::warn_missing_worktrees(&repo_store.repos);
+    if let Err(e) = repo_store.save() {
+        tracing::warn!("Failed to persist reconciled state: {e}");
+    }
+
+    let state = state::AppState::new(vex_home.clone(), token_store, repo_store, user_config);
+
+    // Restart monitoring tasks for agents that are still running
+    for (ws_id, agent_id, tmux_window) in running_agents {
+        let handle = tokio::spawn(server::monitor_agent(
+            state.clone(),
+            ws_id,
+            agent_id.clone(),
+            tmux_window,
+        ));
+        state
+            .monitor_handles
+            .lock()
+            .await
+            .insert(agent_id, handle.abort_handle());
+    }
 
     let socket_path = state.socket_path();
     let tcp_port: u16 = std::env::var("VEXD_TCP_PORT")
@@ -266,7 +339,7 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
     let tcp_addr: SocketAddr = format!("0.0.0.0:{tcp_port}")
         .parse()
         .context("invalid TCP address")?;
-    let tls_dir = vexd_dir.join("tls");
+    let tls_dir = daemon_dir.join("tls");
 
     match server::tcp::cert_fingerprint(&tls_dir) {
         Ok(fp) => tracing::info!("TLS cert fingerprint (blake3): {fp}"),
@@ -303,10 +376,28 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
+// ── Tmux session list ────────────────────────────────────────────────────────
+
+async fn list_tmux_sessions() -> HashSet<String> {
+    let Ok(out) = tokio::process::Command::new("tmux")
+        .arg("list-sessions")
+        .arg("-F")
+        .arg("#{session_name}")
+        .output()
+        .await
+    else {
+        return HashSet::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 // ── Stop helper ─────────────────────────────────────────────────────────────
 
 fn do_stop() -> Result<()> {
-    let pid_file = vexd_dir()?.join("vexd.pid");
+    let pid_file = daemon_dir()?.join("vexd.pid");
     if !pid_file.exists() {
         println!("vexd does not appear to be running (no PID file).");
         return Ok(());
@@ -335,11 +426,11 @@ fn do_stop() -> Result<()> {
 
 // ── Misc helpers ────────────────────────────────────────────────────────────
 
-fn open_log(vexd_dir: &Path) -> Result<File> {
+fn open_log(daemon_dir: &Path) -> Result<File> {
     OpenOptions::new()
         .create(true)
         .append(true)
-        .open(vexd_dir.join("vexd.log"))
+        .open(daemon_dir.join("vexd.log"))
         .context("opening log file")
 }
 

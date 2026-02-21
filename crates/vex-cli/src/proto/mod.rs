@@ -3,11 +3,66 @@ use serde::{Deserialize, Serialize};
 /// Default port vexd listens on for TLS TCP connections.
 pub const DEFAULT_TCP_PORT: u16 = 7422;
 
+// ── Domain types ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Repository {
+    pub id: String,
+    pub name: String,
+    /// Absolute path to the git repository on disk
+    pub path: String,
+    pub registered_at: u64,
+    pub workstreams: Vec<Workstream>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workstream {
+    pub id: String,
+    pub name: String,
+    pub repo_id: String,
+    pub branch: String,
+    /// Absolute path: `$VEX_HOME/worktrees/<workstream_id>`
+    pub worktree_path: String,
+    /// Always `"vex-<workstream_id>"`
+    pub tmux_session: String,
+    pub status: WorkstreamStatus,
+    pub agents: Vec<Agent>,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum WorkstreamStatus {
+    Idle,
+    Running,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Agent {
+    pub id: String,
+    pub workstream_id: String,
+    /// Window index in the tmux session
+    pub tmux_window: u32,
+    pub prompt: String,
+    pub status: AgentStatus,
+    pub exit_code: Option<i32>,
+    pub spawned_at: u64,
+    pub exited_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AgentStatus {
+    Running,
+    Exited,
+    Failed,
+}
+
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum Command {
+    // ── Existing ──────────────────────────────────────────────────────────────
     Status,
     Whoami,
     PairCreate {
@@ -20,11 +75,48 @@ pub enum Command {
         id: String,
     },
     PairRevokeAll,
+
+    // ── Repos (LocalOnly) ─────────────────────────────────────────────────────
+    /// Register a git repository. Unix-socket only (LocalOnly on TCP).
+    RepoRegister {
+        path: String,
+    },
+    RepoList,
+    RepoUnregister {
+        repo_id: String,
+    },
+
+    // ── Workstreams ───────────────────────────────────────────────────────────
+    WorkstreamCreate {
+        repo_id: String,
+        name: String,
+        branch: String,
+    },
+    /// `repo_id = None` means all repos
+    WorkstreamList {
+        repo_id: Option<String>,
+    },
+    WorkstreamDelete {
+        workstream_id: String,
+    },
+
+    // ── Agents ────────────────────────────────────────────────────────────────
+    AgentSpawn {
+        workstream_id: String,
+        prompt: String,
+    },
+    AgentKill {
+        agent_id: String,
+    },
+    AgentList {
+        workstream_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum Response {
+    // ── Existing ──────────────────────────────────────────────────────────────
     Pong,
     Ok,
     DaemonStatus(DaemonStatus),
@@ -36,7 +128,25 @@ pub enum Response {
     /// Returned by PairRevoke / PairRevokeAll, carrying the revoked count.
     Revoked(u32),
     Error(VexProtoError),
+
+    // ── Repos ─────────────────────────────────────────────────────────────────
+    RepoRegistered(Repository),
+    RepoList(Vec<Repository>),
+    RepoUnregistered,
+
+    // ── Workstreams ───────────────────────────────────────────────────────────
+    WorkstreamCreated(Workstream),
+    /// Full tree: repos → workstreams → agents
+    WorkstreamList(Vec<Repository>),
+    WorkstreamDeleted,
+
+    // ── Agents ────────────────────────────────────────────────────────────────
+    AgentSpawned(Agent),
+    AgentKilled,
+    AgentList(Vec<Agent>),
 }
+
+// ── Existing helper types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
