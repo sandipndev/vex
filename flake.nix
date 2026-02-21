@@ -70,6 +70,7 @@
         alejandra
         cargo-watch
         bacon
+        bats
       ];
     in
       with pkgs; {

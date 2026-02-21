@@ -1,11 +1,3 @@
-[package]
-name = "vex"
-version = "0.1.0"
-edition = "2024"
-description = "Parallel, asynchronous, multi-agent work stream orchestration"
-license = "MIT"
-repository = "https://github.com/sandipndev/vex"
-
-[[bin]]
-name = "vex"
-path = "src/main.rs"
+[workspace]
+members = ["crates/vex-proto", "crates/vexd", "crates/vex"]
+resolver = "2"
