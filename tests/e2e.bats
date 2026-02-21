@@ -34,7 +34,7 @@ setup() {
     export VEXD_PID
 
     # Wait up to 5 s for the Unix socket AND the TCP port to be ready
-    local sock="$TEST_HOME/.vexd/vexd.sock"
+    local sock="$TEST_HOME/.vex/daemon/vexd.sock"
     local i=0
     while (( i < 50 )); do
         if [[ -S "$sock" ]] \
