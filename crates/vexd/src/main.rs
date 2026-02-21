@@ -247,7 +247,11 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
     let state = state::AppState::new(vexd_dir.clone(), token_store);
 
     let socket_path = state.socket_path();
-    let tcp_addr: SocketAddr = format!("0.0.0.0:{}", vex_proto::DEFAULT_TCP_PORT)
+    let tcp_port: u16 = std::env::var("VEXD_TCP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(vex_proto::DEFAULT_TCP_PORT);
+    let tcp_addr: SocketAddr = format!("0.0.0.0:{tcp_port}")
         .parse()
         .context("invalid TCP address")?;
     let tls_dir = vexd_dir.join("tls");

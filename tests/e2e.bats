@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
-# Integration tests for all vex/vexd authentication modes.
+# End-to-end tests for all vex/vexd authentication modes.
 #
-# Requires: bats-core >= 1.5, cargo
-# Run:  bats tests/auth.bats
-# Or:   cargo build --workspace && bats tests/auth.bats
+# Requires: bats-core >= 1.9
+# Run:  bats --jobs 4 tests/e2e.bats
+# Or:   cargo build --workspace && bats --jobs 4 tests/e2e.bats
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 VEXD_BIN="$REPO_ROOT/target/debug/vexd"
@@ -16,14 +16,19 @@ setup_file() {
 }
 
 # ── Per-test isolation ────────────────────────────────────────────────────────
-# Each test gets its own HOME directory so daemon state (tokens, TLS certs,
-# PID/socket) and client config (connections) are completely isolated.
+# Each test gets its own HOME directory and TCP port so that all tests can run
+# in parallel without port conflicts or shared state.
 
 setup() {
     TEST_HOME=$(mktemp -d)
     export TEST_HOME
 
-    # Start daemon in the background using the isolated home
+    # Assign a unique TCP port per test: 7500, 7501, 7502, …
+    TCP_PORT=$((7500 + BATS_TEST_NUMBER))
+    export TCP_PORT
+    export VEXD_TCP_PORT="$TCP_PORT"
+
+    # Start daemon in the background using the isolated home and port
     HOME="$TEST_HOME" "$VEXD_BIN" start &
     VEXD_PID=$!
     export VEXD_PID
@@ -33,7 +38,7 @@ setup() {
     local i=0
     while (( i < 50 )); do
         if [[ -S "$sock" ]] \
-           && (: > /dev/tcp/127.0.0.1/7422) 2>/dev/null; then
+           && (: > /dev/tcp/127.0.0.1/$TCP_PORT) 2>/dev/null; then
             return 0
         fi
         sleep 0.1
@@ -100,7 +105,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     pairing=$(pair_token)
     [[ -n "$pairing" ]]
 
-    vex_pipe "$pairing" connect --host localhost:7422
+    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
     run vex status
     [ "$status" -eq 0 ]
@@ -112,7 +117,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     pairing=$(pair_token)
     tok_id="${pairing%%:*}"
 
-    vex_pipe "$pairing" connect --host localhost:7422
+    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
     run vex whoami
     [ "$status" -eq 0 ]
@@ -126,12 +131,12 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     pairing=$(pair_token)
     tok_id="${pairing%%:*}"
 
-    run vex_pipe "${tok_id}:${ZERO_SECRET}" connect --host localhost:7422
+    run vex_pipe "${tok_id}:${ZERO_SECRET}" connect --host "localhost:$TCP_PORT"
     [ "$status" -ne 0 ]
 }
 
 @test "tcp: completely fabricated token is rejected" {
-    run vex_pipe "tok_000000:${ZERO_SECRET}" connect --host localhost:7422
+    run vex_pipe "tok_000000:${ZERO_SECRET}" connect --host "localhost:$TCP_PORT"
     [ "$status" -ne 0 ]
 }
 
@@ -140,7 +145,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     pairing=$(pair_token)
     tok_id="${pairing%%:*}"
 
-    vex_pipe "$pairing" connect --host localhost:7422
+    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
     # Confirm it works before revocation
     run vex status
     [ "$status" -eq 0 ]
@@ -157,7 +162,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     pairing=$(pair_token --expire 1)   # 1-second lifetime
     [[ -n "$pairing" ]]
 
-    vex_pipe "$pairing" connect --host localhost:7422
+    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
     # Works while still within TTL
     run vex status
@@ -176,8 +181,8 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     p2=$(pair_token --label client2)
     [[ -n "$p1" && -n "$p2" ]]
 
-    vex_pipe "$p1" connect -n conn1 --host localhost:7422
-    vex_pipe "$p2" connect -n conn2 --host localhost:7422
+    vex_pipe "$p1" connect -n conn1 --host "localhost:$TCP_PORT"
+    vex_pipe "$p2" connect -n conn2 --host "localhost:$TCP_PORT"
 
     # Both work before revocation
     run vex status -c conn1; [ "$status" -eq 0 ]
@@ -195,7 +200,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
 @test "tofu: fingerprint is saved to config on first TCP connect" {
     local pairing
     pairing=$(pair_token)
-    vex_pipe "$pairing" connect --host localhost:7422
+    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
     grep -q 'tls_fingerprint' "$TEST_HOME/.vex/config.toml"
 }
@@ -203,7 +208,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
 @test "tofu: subsequent connections with the same cert succeed" {
     local pairing
     pairing=$(pair_token)
-    vex_pipe "$pairing" connect --host localhost:7422
+    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
     # First call establishes the pinned fingerprint (already done above)
     run vex status
@@ -217,7 +222,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
 @test "tofu: tampered fingerprint is rejected with a clear error" {
     local pairing
     pairing=$(pair_token)
-    vex_pipe "$pairing" connect --host localhost:7422
+    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
     # Corrupt the saved fingerprint in-place
     local fake
@@ -241,7 +246,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     # Remote TCP connection saved as 'remote'
     local pairing
     pairing=$(pair_token)
-    vex_pipe "$pairing" connect -n remote --host localhost:7422
+    vex_pipe "$pairing" connect -n remote --host "localhost:$TCP_PORT"
 
     run vex status -c local
     [ "$status" -eq 0 ]
@@ -257,7 +262,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
 
     local pairing
     pairing=$(pair_token)
-    vex_pipe "$pairing" connect -n remote --host localhost:7422
+    vex_pipe "$pairing" connect -n remote --host "localhost:$TCP_PORT"
 
     run vex status --all
     [ "$status" -eq 0 ]

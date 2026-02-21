@@ -28,8 +28,8 @@ jobs:
       - name: Test
         run: cargo test
 
-  bats:
-    name: BATS Integration Tests
+  e2e:
+    name: E2E Tests
     runs-on: ubuntu-latest
     needs: check
     steps:
@@ -44,5 +44,5 @@ jobs:
           git clone --depth 1 --branch v1.11.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
           sudo /tmp/bats-core/install.sh /usr/local
 
-      - name: Run BATS auth tests
-        run: bats tests/auth.bats
+      - name: Run e2e tests
+        run: bats --jobs 4 tests/e2e.bats
