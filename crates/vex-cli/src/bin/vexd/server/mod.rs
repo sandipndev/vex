@@ -56,13 +56,8 @@ where
                     .await;
             }
             Command::AttachShell { shell_id } => {
-                // Shell attach streams PTY output — restrict to local Unix socket
-                // so remote TCP clients cannot snoop on interactive shell sessions.
-                if matches!(transport, Transport::Tcp) {
-                    vex_cli::framing::send(&mut stream, &Response::Error(VexProtoError::LocalOnly))
-                        .await?;
-                    return Ok(());
-                }
+                // Allowed over both Unix and TCP — authenticated remote clients
+                // can attach to shell sessions and stream PTY I/O.
                 return handle_shell_attach_streaming(stream, &state, shell_id).await;
             }
             cmd => {
