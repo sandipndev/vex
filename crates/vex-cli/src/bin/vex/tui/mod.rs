@@ -486,6 +486,7 @@ async fn create_workstream(
         repo_id,
         name,
         branch,
+        from_ref: None,
         fetch_latest,
     })
     .await?;

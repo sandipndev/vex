@@ -197,7 +197,10 @@ enum WorkstreamCmd {
         /// Branch to check out; omit to use the repo's default branch
         #[arg(long)]
         branch: Option<String>,
-        /// Fetch from origin and fast-forward the branch before creating
+        /// Explicit start point: tag, commit hash, or branch to create <branch> from
+        #[arg(long)]
+        from: Option<String>,
+        /// Fetch from origin before creating
         #[arg(long)]
         fetch: bool,
         #[command(flatten)]
@@ -564,6 +567,7 @@ async fn cmd_workstream(action: WorkstreamCmd) -> Result<()> {
             repo_id,
             name,
             branch,
+            from,
             fetch,
             single,
         } => {
@@ -572,6 +576,7 @@ async fn cmd_workstream(action: WorkstreamCmd) -> Result<()> {
                 repo_id,
                 name,
                 branch,
+                from_ref: from,
                 fetch_latest: fetch,
             })
             .await?;

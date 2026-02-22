@@ -133,8 +133,10 @@ pub enum Command {
         name: Option<String>,
         /// Branch to check out. `None` = use the repo's `default_branch`.
         branch: Option<String>,
-        /// If true, fetch `origin/<branch>` and fast-forward the local branch
-        /// before creating the worktree.
+        /// Explicit git start point (tag, commit, branch). When set, a new local
+        /// branch named `branch` is created from this ref.
+        from_ref: Option<String>,
+        /// If true, fetch from origin before creating the worktree.
         fetch_latest: bool,
     },
     /// `repo_id = None` means all repos
