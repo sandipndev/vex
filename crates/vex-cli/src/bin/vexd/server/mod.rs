@@ -27,11 +27,17 @@ pub async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Drop idle connections after 5 minutes with no command, preventing
+    // authenticated clients from holding file descriptors open indefinitely.
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
     loop {
-        let cmd: Command = match vex_cli::framing::recv(&mut stream).await {
-            Ok(c) => c,
-            Err(_) => break,
-        };
+        let cmd: Command =
+            match tokio::time::timeout(IDLE_TIMEOUT, vex_cli::framing::recv(&mut stream)).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(_)) => break, // client disconnected / framing error
+                Err(_) => break,     // idle timeout
+            };
         // Streaming commands consume the connection — handle before dispatch
         match cmd {
             Command::ShellRegister {
@@ -50,6 +56,13 @@ where
                     .await;
             }
             Command::AttachShell { shell_id } => {
+                // Shell attach streams PTY output — restrict to local Unix socket
+                // so remote TCP clients cannot snoop on interactive shell sessions.
+                if matches!(transport, Transport::Tcp) {
+                    vex_cli::framing::send(&mut stream, &Response::Error(VexProtoError::LocalOnly))
+                        .await?;
+                    return Ok(());
+                }
                 return handle_shell_attach_streaming(stream, &state, shell_id).await;
             }
             cmd => {

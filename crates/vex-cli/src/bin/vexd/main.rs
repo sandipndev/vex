@@ -329,6 +329,11 @@ fn do_start() -> Result<()> {
 
     let daemon_dir = daemon_dir()?;
     std::fs::create_dir_all(&daemon_dir)?;
+    // Restrict daemon dir so other local users cannot traverse into it
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::create_dir_all(daemon_dir.join("tls"))?;
 
     let log = open_log(&daemon_dir)?;
@@ -351,6 +356,10 @@ fn do_start() -> Result<()> {
 fn run_foreground() -> Result<()> {
     let daemon_dir = daemon_dir()?;
     std::fs::create_dir_all(&daemon_dir)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::create_dir_all(daemon_dir.join("tls"))?;
     std::fs::write(daemon_dir.join("vexd.pid"), std::process::id().to_string())
         .context("writing PID file")?;
@@ -439,6 +448,10 @@ async fn run_daemon(vex_home: PathBuf) -> Result<()> {
 
     let daemon_dir = vex_home.join("daemon");
     std::fs::create_dir_all(&daemon_dir)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
 
     let user_config = UserConfig::load(&vex_home);
     let token_store = auth::TokenStore::load(daemon_dir.join("tokens.json"))?;

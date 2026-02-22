@@ -405,6 +405,9 @@ pub mod framing {
         Ok(())
     }
 
+    /// Maximum allowed frame size (16 MiB). Prevents OOM from malicious length prefixes.
+    const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
+
     /// Read a length-prefixed JSON frame from `r`.
     pub async fn recv<R, T>(r: &mut R) -> Result<T, VexFrameError>
     where
@@ -412,6 +415,12 @@ pub mod framing {
         T: for<'de> Deserialize<'de>,
     {
         let len = r.read_u32().await?;
+        if len > MAX_FRAME_SIZE {
+            return Err(VexFrameError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame too large: {len} bytes (max {MAX_FRAME_SIZE})"),
+            )));
+        }
         let mut buf = vec![0u8; len as usize];
         r.read_exact(&mut buf).await?;
         Ok(serde_json::from_slice(&buf)?)
