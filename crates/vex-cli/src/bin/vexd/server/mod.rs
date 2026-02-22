@@ -103,5 +103,44 @@ pub async fn dispatch(
             let count = store.revoke_all();
             Response::Revoked(count as u32)
         }
+
+        Command::RepoRegister { name, path } => {
+            if matches!(transport, Transport::Tcp) {
+                return Response::Error(VexProtoError::LocalOnly);
+            }
+            let mut store = state.repo_store.lock().await;
+            match store.register(name, path) {
+                Ok(entry) => Response::Repo(vex_proto::RepoInfo {
+                    name: entry.name,
+                    path: entry.path,
+                }),
+                Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
+            }
+        }
+
+        Command::RepoUnregister { name } => {
+            if matches!(transport, Transport::Tcp) {
+                return Response::Error(VexProtoError::LocalOnly);
+            }
+            let mut store = state.repo_store.lock().await;
+            if store.unregister(&name) {
+                Response::Ok
+            } else {
+                Response::Error(VexProtoError::NotFound)
+            }
+        }
+
+        Command::RepoList => {
+            let store = state.repo_store.lock().await;
+            let repos = store
+                .list()
+                .iter()
+                .map(|r| vex_proto::RepoInfo {
+                    name: r.name.clone(),
+                    path: r.path.clone(),
+                })
+                .collect();
+            Response::Repos(repos)
+        }
     }
 }

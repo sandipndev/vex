@@ -38,6 +38,8 @@ enum Commands {
     Status(ConnectionFlag),
     /// Show who you are connected as
     Whoami(ConnectionFlag),
+    /// List registered repositories
+    Repos(ConnectionFlag),
     /// Print shell completion script
     Completions {
         /// Shell to generate completions for
@@ -85,6 +87,7 @@ async fn main() -> Result<()> {
         Commands::List => cmd_list(),
         Commands::Status(flag) => cmd_with_connections(flag, DaemonCmd::Status).await,
         Commands::Whoami(flag) => cmd_with_connections(flag, DaemonCmd::Whoami).await,
+        Commands::Repos(flag) => cmd_with_connections(flag, DaemonCmd::Repos).await,
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
             Ok(())
@@ -228,12 +231,14 @@ fn cmd_list() -> Result<()> {
 enum DaemonCmd {
     Status,
     Whoami,
+    Repos,
 }
 
 async fn run_cmd(conn: &mut Connection, cmd: DaemonCmd) -> Result<()> {
     match cmd {
         DaemonCmd::Status => run_status(conn).await,
         DaemonCmd::Whoami => run_whoami(conn).await,
+        DaemonCmd::Repos => run_repos(conn).await,
     }
 }
 
@@ -318,6 +323,23 @@ async fn run_whoami(conn: &mut Connection) -> Result<()> {
                 println!("authenticated as token: {id}");
             } else {
                 println!("unauthenticated TCP connection");
+            }
+        }
+        other => println!("{other:?}"),
+    }
+    Ok(())
+}
+
+async fn run_repos(conn: &mut Connection) -> Result<()> {
+    conn.send(&vex_proto::Command::RepoList).await?;
+    let response: vex_proto::Response = conn.recv().await?;
+    match response {
+        vex_proto::Response::Repos(repos) => {
+            if repos.is_empty() {
+                println!("No registered repositories.");
+            }
+            for r in &repos {
+                println!("{:<20} {}", r.name, r.path);
             }
         }
         other => println!("{other:?}"),

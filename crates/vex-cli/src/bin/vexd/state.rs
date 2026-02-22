@@ -9,20 +9,23 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::auth::TokenStore;
+use crate::repo::RepoStore;
 
 pub struct AppState {
     pub start_time: Instant,
     pub client_counter: AtomicU32,
     pub token_store: Arc<Mutex<TokenStore>>,
+    pub repo_store: Arc<Mutex<RepoStore>>,
     pub vexd_dir: PathBuf,
 }
 
 impl AppState {
-    pub fn new(vexd_dir: PathBuf, token_store: TokenStore) -> Arc<Self> {
+    pub fn new(vexd_dir: PathBuf, token_store: TokenStore, repo_store: RepoStore) -> Arc<Self> {
         Arc::new(Self {
             start_time: Instant::now(),
             client_counter: AtomicU32::new(0),
             token_store: Arc::new(Mutex::new(token_store)),
+            repo_store: Arc::new(Mutex::new(repo_store)),
             vexd_dir,
         })
     }

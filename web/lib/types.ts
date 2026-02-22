@@ -10,7 +10,10 @@ export type Command =
   | { type: "PairCreate"; data: { label?: string; expire_secs?: number } }
   | { type: "PairList" }
   | { type: "PairRevoke"; data: { id: string } }
-  | { type: "PairRevokeAll" };
+  | { type: "PairRevokeAll" }
+  | { type: "RepoRegister"; data: { name: string; path: string } }
+  | { type: "RepoUnregister"; data: { name: string } }
+  | { type: "RepoList" };
 
 export type Response =
   | { type: "Pong" }
@@ -21,6 +24,8 @@ export type Response =
   | { type: "PairedClient"; data: PairedClient }
   | { type: "PairedClients"; data: PairedClient[] }
   | { type: "Revoked"; data: number }
+  | { type: "Repo"; data: RepoInfo }
+  | { type: "Repos"; data: RepoInfo[] }
   | { type: "Error"; data: VexProtoError };
 
 export interface DaemonStatus {
@@ -41,6 +46,11 @@ export interface PairedClient {
   created_at: string;
   expires_at?: string;
   last_seen?: string;
+}
+
+export interface RepoInfo {
+  name: string;
+  path: string;
 }
 
 export interface ClientInfo {
