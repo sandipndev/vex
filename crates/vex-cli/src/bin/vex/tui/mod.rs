@@ -19,7 +19,11 @@ const DETACH_BYTE: u8 = 0x1D;
 
 // ── TUI entry ─────────────────────────────────────────────────────────────────
 
-pub async fn run(mut conn: Connection, conn_label: String, conn_entry: ConnectionEntry) -> Result<()> {
+pub async fn run(
+    mut conn: Connection,
+    conn_label: String,
+    conn_entry: ConnectionEntry,
+) -> Result<()> {
     // Determine is_local via Whoami from the server, not conn.is_unix().
     // A proxy Unix socket to a remote vexd would be is_unix()==true but
     // the server knows the truth.

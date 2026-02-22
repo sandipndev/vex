@@ -866,7 +866,6 @@ async fn cmd_attach(args: AttachArgs) -> Result<()> {
     Ok(())
 }
 
-
 // ── Tabular helpers ───────────────────────────────────────────────────────────
 
 fn print_workstream_table(repos: &[vex_proto::Repository]) {

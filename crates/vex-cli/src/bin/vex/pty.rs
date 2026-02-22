@@ -49,7 +49,10 @@ where
     // POLLHUP on the pipe fd, and the thread exits.
     let mut pipe_fds = [0i32; 2];
     if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
-        return Err(anyhow::anyhow!("pipe() failed: {}", std::io::Error::last_os_error()));
+        return Err(anyhow::anyhow!(
+            "pipe() failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     let pipe_read_fd = pipe_fds[0];
     let _cancel_guard = PipeGuard(pipe_fds[1]); // close write-end on drop → unblocks poll
@@ -62,8 +65,16 @@ where
 
         loop {
             let mut pollfds = [
-                libc::pollfd { fd: stdin_fd, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: pipe_read_fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd {
+                    fd: stdin_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: pipe_read_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), 2, -1) };
             if ret <= 0 {
