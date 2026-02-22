@@ -117,9 +117,10 @@ async fn handle_key(
                         Some("No repos registered. Run 'vexd repo register <path>'.".to_string());
                 } else if app.repos.len() == 1 {
                     app.create_input.clear();
-                    app.mode = Mode::CreateBranchInput {
+                    app.mode = Mode::CreateNameInput {
                         repo_id: app.repos[0].id.clone(),
                         repo_name: app.repos[0].name.clone(),
+                        default_branch: app.repos[0].default_branch.clone(),
                     };
                 } else {
                     app.mode = Mode::CreateSelectRepo { selected: 0 };
@@ -245,30 +246,121 @@ async fn handle_key(
                 KeyCode::Enter => {
                     let repo = app.repos[sel].clone();
                     app.create_input.clear();
-                    app.mode = Mode::CreateBranchInput {
+                    app.mode = Mode::CreateNameInput {
                         repo_id: repo.id,
-                        repo_name: repo.name,
+                        repo_name: repo.name.clone(),
+                        default_branch: repo.default_branch,
                     };
                 }
                 _ => {}
             }
         }
 
-        Mode::CreateBranchInput { repo_id, .. } => {
+        Mode::CreateNameInput {
+            repo_id,
+            repo_name,
+            default_branch,
+        } => {
             let repo_id = repo_id.clone();
+            let repo_name = repo_name.clone();
+            let default_branch = default_branch.clone();
             match key {
                 KeyCode::Esc => {
                     app.mode = Mode::Normal;
                     app.create_input.clear();
                 }
                 KeyCode::Enter => {
-                    let branch = app.create_input.trim().to_string();
-                    if branch.is_empty() {
+                    let name = app.create_input.trim().to_string();
+                    if name.is_empty() {
                         return Ok(false);
                     }
-                    app.mode = Mode::Normal;
                     app.create_input.clear();
-                    match create_workstream(conn, repo_id, branch.clone()).await {
+                    app.mode = Mode::CreateBranchInput {
+                        repo_id,
+                        repo_name,
+                        name,
+                        default_branch,
+                    };
+                }
+                KeyCode::Backspace => {
+                    app.create_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.create_input.push(c);
+                }
+                _ => {}
+            }
+        }
+
+        Mode::CreateBranchInput {
+            repo_id,
+            repo_name,
+            name,
+            default_branch,
+        } => {
+            let repo_id = repo_id.clone();
+            let repo_name = repo_name.clone();
+            let name = name.clone();
+            let default_branch = default_branch.clone();
+            match key {
+                KeyCode::Esc => {
+                    // Go back to name step, pre-populate create_input with the name
+                    app.create_input = name.clone();
+                    app.mode = Mode::CreateNameInput {
+                        repo_id,
+                        repo_name,
+                        default_branch,
+                    };
+                }
+                KeyCode::Enter => {
+                    let branch_raw = app.create_input.trim().to_string();
+                    let branch = if branch_raw.is_empty() {
+                        None
+                    } else {
+                        Some(branch_raw)
+                    };
+                    app.create_input.clear();
+                    app.mode = Mode::CreateConfirmFetch {
+                        repo_id,
+                        name,
+                        branch,
+                    };
+                }
+                KeyCode::Backspace => {
+                    app.create_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.create_input.push(c);
+                }
+                _ => {}
+            }
+        }
+
+        Mode::CreateConfirmFetch {
+            repo_id,
+            name,
+            branch,
+        } => {
+            let repo_id = repo_id.clone();
+            let name = name.clone();
+            let branch = branch.clone();
+            match key {
+                KeyCode::Char('y') => {
+                    app.mode = Mode::Normal;
+                    match create_workstream(conn, repo_id, Some(name), branch, true).await {
+                        Ok(ws) => {
+                            app.status_msg =
+                                Some(format!("Created workstream '{}' (fetched)", ws.name));
+                            refresh_repos(conn, app).await;
+                        }
+                        Err(e) => {
+                            app.status_msg = Some(format!("Error: {e}"));
+                        }
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Enter => {
+                    app.mode = Mode::Normal;
+                    match create_workstream(conn, repo_id, Some(name), branch, false).await {
                         Ok(ws) => {
                             app.status_msg = Some(format!("Created workstream '{}'", ws.name));
                             refresh_repos(conn, app).await;
@@ -278,11 +370,22 @@ async fn handle_key(
                         }
                     }
                 }
-                KeyCode::Backspace => {
-                    app.create_input.pop();
-                }
-                KeyCode::Char(c) => {
-                    app.create_input.push(c);
+                KeyCode::Esc => {
+                    // Go back to branch step; restore create_input to whatever branch was
+                    app.create_input = branch.unwrap_or_default();
+                    // We lost repo_name and default_branch, get from repos list
+                    let (rname, db) = app
+                        .repos
+                        .iter()
+                        .find(|r| r.id == repo_id)
+                        .map(|r| (r.name.clone(), r.default_branch.clone()))
+                        .unwrap_or_default();
+                    app.mode = Mode::CreateBranchInput {
+                        repo_id,
+                        repo_name: rname,
+                        name,
+                        default_branch: db,
+                    };
                 }
                 _ => {}
             }
@@ -361,12 +464,15 @@ async fn spawn_agent(
 async fn create_workstream(
     conn: &mut Connection,
     repo_id: String,
-    branch: String,
+    name: Option<String>,
+    branch: Option<String>,
+    fetch_latest: bool,
 ) -> Result<vex_cli::Workstream> {
     conn.send(&Command::WorkstreamCreate {
         repo_id,
-        name: branch.clone(),
+        name,
         branch,
+        fetch_latest,
     })
     .await?;
     let resp: Response = conn.recv().await?;

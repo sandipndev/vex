@@ -242,18 +242,51 @@ fn main() -> Result<()> {
                         .canonicalize()
                         .with_context(|| format!("cannot resolve '{}'", path.display()))?;
                     let path_str = abs.to_string_lossy().to_string();
-                    match local::send_command(
+                    let repo = match local::send_command(
                         &sock,
-                        &vex_proto::Command::RepoRegister { path: path_str },
+                        &vex_proto::Command::RepoRegister {
+                            path: path_str.clone(),
+                        },
                     )
                     .await?
                     {
-                        vex_proto::Response::RepoRegistered(repo) => {
-                            println!("Registered {} ({}) at {}", repo.id, repo.name, repo.path);
-                        }
+                        vex_proto::Response::RepoRegistered(repo) => repo,
+                        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                        other => anyhow::bail!("Unexpected: {other:?}"),
+                    };
+
+                    // Detect git default branch
+                    let detected = detect_default_branch(&path_str).await;
+                    let prompt = format!("Default branch for {}? [{}]: ", repo.name, detected);
+                    eprint!("{prompt}");
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    let chosen = input.trim();
+                    let default_branch = if chosen.is_empty() {
+                        detected
+                    } else {
+                        chosen.to_string()
+                    };
+
+                    // Persist the chosen branch (even if same as server default)
+                    match local::send_command(
+                        &sock,
+                        &vex_proto::Command::RepoSetDefaultBranch {
+                            repo_id: repo.id.clone(),
+                            branch: default_branch.clone(),
+                        },
+                    )
+                    .await?
+                    {
+                        vex_proto::Response::RepoDefaultBranchSet => {}
                         vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
                         other => anyhow::bail!("Unexpected: {other:?}"),
                     }
+
+                    println!(
+                        "Registered {} ({}) at {} [default branch: {}]",
+                        repo.id, repo.name, repo.path, default_branch
+                    );
                 }
             }
             Ok(())
@@ -425,6 +458,48 @@ fn do_stop() -> Result<()> {
 }
 
 // ── Misc helpers ────────────────────────────────────────────────────────────
+
+/// Attempt to detect the default branch for a repo path.
+/// Tries `git symbolic-ref refs/remotes/origin/HEAD`, then falls back to
+/// `git rev-parse --abbrev-ref HEAD`, then "main".
+async fn detect_default_branch(repo_path: &str) -> String {
+    // Try origin/HEAD symbolic ref first
+    if let Ok(out) = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("symbolic-ref")
+        .arg("refs/remotes/origin/HEAD")
+        .arg("--short")
+        .output()
+        .await
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        // e.g. "origin/main" → "main"
+        if let Some(branch) = s.trim().strip_prefix("origin/") {
+            return branch.to_string();
+        }
+    }
+
+    // Fall back to current HEAD branch
+    if let Ok(out) = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .output()
+        .await
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() && s != "HEAD" {
+            return s;
+        }
+    }
+
+    "main".to_string()
+}
 
 fn open_log(daemon_dir: &Path) -> Result<File> {
     OpenOptions::new()

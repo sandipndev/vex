@@ -112,11 +112,15 @@ enum WorkstreamCmd {
     /// Create a new workstream (git worktree + tmux session)
     Create {
         repo_id: String,
-        /// Workstream name; defaults to the branch name if omitted
+        /// Workstream name; defaults to <branch> if omitted
         #[arg(long)]
         name: Option<String>,
+        /// Branch to check out; omit to use the repo's default branch
         #[arg(long)]
-        branch: String,
+        branch: Option<String>,
+        /// Fetch from origin and fast-forward the branch before creating
+        #[arg(long)]
+        fetch: bool,
         #[command(flatten)]
         single: Single,
     },
@@ -431,9 +435,12 @@ async fn cmd_repo(action: RepoCmd) -> Result<()> {
                         println!("No repositories registered.");
                         return Ok(());
                     }
-                    println!("{:<14} {:<20} PATH", "ID", "NAME");
+                    println!("{:<14} {:<20} {:<15} PATH", "ID", "NAME", "DEFAULT_BRANCH");
                     for repo in &repos {
-                        println!("{:<14} {:<20} {}", repo.id, repo.name, repo.path);
+                        println!(
+                            "{:<14} {:<20} {:<15} {}",
+                            repo.id, repo.name, repo.default_branch, repo.path
+                        );
                     }
                 }
                 other => anyhow::bail!("Unexpected: {other:?}"),
@@ -466,19 +473,23 @@ async fn cmd_workstream(action: WorkstreamCmd) -> Result<()> {
             repo_id,
             name,
             branch,
+            fetch,
             single,
         } => {
-            let name = name.unwrap_or_else(|| branch.clone());
             let (mut conn, _) = open_single_connection(single.connection).await?;
             conn.send(&vex_proto::Command::WorkstreamCreate {
                 repo_id,
                 name,
                 branch,
+                fetch_latest: fetch,
             })
             .await?;
             let resp: vex_proto::Response = conn.recv().await?;
             match resp {
                 vex_proto::Response::WorkstreamCreated(ws) => {
+                    if fetch {
+                        println!("Fetched latest origin/{}", ws.branch);
+                    }
                     println!("Created workstream {} ({})", ws.id, ws.name);
                     println!("  branch:  {}", ws.branch);
                     println!("  session: {}", ws.tmux_session);

@@ -20,10 +20,25 @@ pub enum Mode {
     CreateSelectRepo {
         selected: usize,
     },
-    /// User is typing a branch name for the new workstream
+    /// Step 1: user is typing the workstream name
+    CreateNameInput {
+        repo_id: String,
+        repo_name: String,
+        default_branch: String,
+    },
+    /// Step 2: user is typing a branch name (empty = use default_branch)
     CreateBranchInput {
         repo_id: String,
         repo_name: String,
+        name: String,
+        default_branch: String,
+    },
+    /// Step 3: confirm whether to fetch from origin
+    CreateConfirmFetch {
+        repo_id: String,
+        name: String,
+        /// None means use the repo's default branch
+        branch: Option<String>,
     },
 }
 

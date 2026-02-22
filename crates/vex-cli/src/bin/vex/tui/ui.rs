@@ -20,7 +20,9 @@ pub fn render(f: &mut Frame, app: &App) {
         Mode::SpawnInput
         | Mode::ConfirmAttach { .. }
         | Mode::CreateSelectRepo { .. }
-        | Mode::CreateBranchInput { .. } => 3,
+        | Mode::CreateNameInput { .. }
+        | Mode::CreateBranchInput { .. }
+        | Mode::CreateConfirmFetch { .. } => 3,
         _ => 1,
     };
     let chunks = Layout::default()
@@ -273,12 +275,44 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             ];
             Paragraph::new(lines)
         }
-        Mode::CreateBranchInput { repo_name, .. } => {
-            let prompt = format!("Branch [{repo_name}]: {}_", app.create_input);
+        Mode::CreateNameInput { .. } => {
+            let prompt = format!("Workstream name: {}_", app.create_input);
             let lines = vec![
                 Line::from(Span::styled(prompt, Style::default())),
                 Line::from(Span::styled(
-                    "enter to create   esc to cancel",
+                    "enter to confirm   esc to cancel",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            Paragraph::new(lines)
+        }
+        Mode::CreateBranchInput {
+            repo_name,
+            default_branch,
+            ..
+        } => {
+            let prompt = format!(
+                "Branch [{repo_name}] (default: {default_branch}): {}_",
+                app.create_input
+            );
+            let lines = vec![
+                Line::from(Span::styled(prompt, Style::default())),
+                Line::from(Span::styled(
+                    "enter to confirm   esc to go back",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            Paragraph::new(lines)
+        }
+        Mode::CreateConfirmFetch { branch, .. } => {
+            let branch_str = branch.as_deref().unwrap_or("default");
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("Fetch latest from origin/{branch_str}? [y/N]"),
+                    Style::default().fg(Color::Green),
+                )),
+                Line::from(Span::styled(
+                    "y fetch   n/enter skip   esc go back",
                     Style::default().fg(Color::DarkGray),
                 )),
             ];
