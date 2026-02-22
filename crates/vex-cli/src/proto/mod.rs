@@ -23,6 +23,14 @@ pub enum Command {
         id: String,
     },
     PairRevokeAll,
+    RepoRegister {
+        name: String,
+        path: String,
+    },
+    RepoUnregister {
+        name: String,
+    },
+    RepoList,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +46,8 @@ pub enum Response {
     PairedClients(Vec<PairedClient>),
     /// Returned by PairRevoke / PairRevokeAll, carrying the revoked count.
     Revoked(u32),
+    Repo(RepoInfo),
+    Repos(Vec<RepoInfo>),
     Error(VexProtoError),
 }
 
@@ -71,6 +81,12 @@ pub struct PairedClient {
     pub created_at: String,
     pub expires_at: Option<String>,
     pub last_seen: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoInfo {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

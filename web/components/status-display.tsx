@@ -1,6 +1,8 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { useConnection } from "./connection-provider";
+import type { RepoInfo } from "@/lib/types";
 
 function formatUptime(secs: number): string {
   const days = Math.floor(secs / 86400);
@@ -17,7 +19,25 @@ function formatUptime(secs: number): string {
 }
 
 export function StatusDisplay() {
-  const { daemonStatus, credentials, disconnect } = useConnection();
+  const { daemonStatus, credentials, disconnect, sendCommand } = useConnection();
+  const [repos, setRepos] = useState<RepoInfo[]>([]);
+
+  const fetchRepos = useCallback(async () => {
+    try {
+      const res = await sendCommand({ type: "RepoList" });
+      if (res.type === "Repos") {
+        setRepos(res.data);
+      }
+    } catch {
+      // ignore — repos are supplemental info
+    }
+  }, [sendCommand]);
+
+  useEffect(() => {
+    if (daemonStatus && credentials) {
+      fetchRepos();
+    }
+  }, [daemonStatus, credentials, fetchRepos]);
 
   if (!daemonStatus || !credentials) return null;
 
@@ -55,6 +75,24 @@ export function StatusDisplay() {
             </span>
           </div>
         </div>
+      </div>
+
+      <div data-cy="repos-section" className="border border-neutral-700 rounded p-6 space-y-4">
+        <h2 className="text-lg font-semibold text-white">Repositories</h2>
+        {repos.length === 0 ? (
+          <p data-cy="repos-empty" className="text-sm text-neutral-400">
+            No repositories registered
+          </p>
+        ) : (
+          <div className="space-y-2 text-sm">
+            {repos.map((r) => (
+              <div key={r.name} data-cy="repo-item" className="flex justify-between">
+                <span className="text-white font-mono">{r.name}</span>
+                <span className="text-neutral-400 font-mono truncate ml-4">{r.path}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <button
