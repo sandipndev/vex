@@ -269,7 +269,7 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
     let http_port: u16 = std::env::var("VEXD_HTTP_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(vex_proto::DEFAULT_HTTP_PORT);
+        .unwrap_or(tcp_port + 1);
     let http_addr: SocketAddr = format!("0.0.0.0:{http_port}")
         .parse()
         .context("invalid HTTP address")?;
