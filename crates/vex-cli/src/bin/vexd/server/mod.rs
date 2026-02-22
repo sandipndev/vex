@@ -288,7 +288,7 @@ async fn handle_workstream_create(
         }
     };
 
-    // Optionally fetch from origin and fast-forward the local branch
+    // Optionally fetch from origin
     if fetch_latest {
         let fetch_out = tokio::process::Command::new("git")
             .arg("-C")
@@ -308,30 +308,10 @@ async fn handle_workstream_create(
             }
             Ok(_) => {}
         }
-
-        let ff_out = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .arg("branch")
-            .arg("-f")
-            .arg(&branch)
-            .arg(format!("origin/{branch}"))
-            .output()
-            .await;
-        match ff_out {
-            Err(e) => return err(format!("failed to run git branch -f: {e}")),
-            Ok(o) if !o.status.success() => {
-                return err(format!(
-                    "failed to fast-forward {branch} to origin/{branch}: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                ));
-            }
-            Ok(_) => {}
-        }
     }
 
-    // Validate branch exists locally
-    match tokio::process::Command::new("git")
+    // Validate branch exists (locally or on origin)
+    let local_exists = tokio::process::Command::new("git")
         .arg("-C")
         .arg(&repo_path)
         .arg("branch")
@@ -339,30 +319,60 @@ async fn handle_workstream_create(
         .arg(&branch)
         .output()
         .await
-    {
-        Err(e) => return err(format!("git error: {e}")),
-        Ok(out) => {
-            if String::from_utf8_lossy(&out.stdout).trim().is_empty() {
-                return err(format!("branch '{branch}' not found in {repo_path}"));
-            }
-        }
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
+    let remote_exists = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(format!("origin/{branch}"))
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !local_exists && !remote_exists {
+        return err(format!(
+            "branch '{branch}' not found locally or on origin in {repo_path}"
+        ));
     }
 
     let ws_id = gen_id("ws");
     let worktree_path = state.worktrees_dir().join(&ws_id);
     let tmux_session = format!("vex-{ws_id}");
 
-    // Create git worktree
-    let out = match tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo_path)
-        .arg("worktree")
-        .arg("add")
-        .arg(&worktree_path)
-        .arg(&branch)
-        .output()
-        .await
-    {
+    // Create git worktree on a throwaway branch named after the workstream ID.
+    // Prefer starting from origin/<branch> so the worktree doesn't require the
+    // local branch to be free (i.e. not checked out elsewhere).
+    // Fall back to <branch> for local-only repos without a remote.
+    let worktree_out = if remote_exists {
+        tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("worktree")
+            .arg("add")
+            .arg(&worktree_path)
+            .arg("--no-track")
+            .arg("-b")
+            .arg(&ws_id)
+            .arg(format!("origin/{branch}"))
+            .output()
+            .await
+    } else {
+        tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("worktree")
+            .arg("add")
+            .arg(&worktree_path)
+            .arg("--no-track")
+            .arg("-b")
+            .arg(&ws_id)
+            .arg(&branch)
+            .output()
+            .await
+    };
+    let out = match worktree_out {
         Err(e) => return err(format!("git worktree add failed: {e}")),
         Ok(o) => o,
     };
