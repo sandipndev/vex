@@ -13,9 +13,6 @@ pub async fn serve_unix(state: Arc<AppState>, socket_path: PathBuf) -> anyhow::R
     }
 
     let listener = UnixListener::bind(&socket_path)?;
-    // Restrict socket to owner-only so other local users cannot connect
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("Unix socket listening at {}", socket_path.display());
 
     loop {

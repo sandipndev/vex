@@ -204,10 +204,6 @@ impl Connection {
         Ok((Connection::Tcp(Box::new(tls_stream)), new_fingerprint))
     }
 
-    pub fn is_unix(&self) -> bool {
-        matches!(self, Connection::Unix(_))
-    }
-
     pub async fn send<T: serde::Serialize>(&mut self, msg: &T) -> Result<()> {
         match self {
             Connection::Unix(s) => framing::send(s, msg).await.map_err(Into::into),
