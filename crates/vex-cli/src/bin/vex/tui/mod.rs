@@ -416,8 +416,7 @@ async fn handle_key(
             match key {
                 KeyCode::Char('y') => {
                     app.mode = Mode::Normal;
-                    match create_workstream(conn, repo_id, Some(name), branch, from_ref, true)
-                        .await
+                    match create_workstream(conn, repo_id, Some(name), branch, from_ref, true).await
                     {
                         Ok(ws) => {
                             app.status_msg =
