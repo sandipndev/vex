@@ -1226,6 +1226,79 @@ fn build_send_keys_cmd(cmd_parts: &[&str], prompt: &str) -> String {
     format!("{} '{escaped}'", cmd_parts.join(" "))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{RING_MAX, build_send_keys_cmd, ring_append};
+
+    #[test]
+    fn build_cmd_empty_prompt_returns_base_command() {
+        assert_eq!(
+            build_send_keys_cmd(&["claude", "--model", "sonnet"], ""),
+            "claude --model sonnet"
+        );
+    }
+
+    #[test]
+    fn build_cmd_simple_prompt() {
+        assert_eq!(
+            build_send_keys_cmd(&["claude"], "write a test"),
+            "claude 'write a test'"
+        );
+    }
+
+    #[test]
+    fn build_cmd_prompt_with_single_quotes() {
+        // Single quotes in prompt must be escaped for shell safety
+        assert_eq!(
+            build_send_keys_cmd(&["claude"], "it's a test"),
+            "claude 'it'\\''s a test'"
+        );
+    }
+
+    #[test]
+    fn build_cmd_multi_word_base() {
+        assert_eq!(
+            build_send_keys_cmd(
+                &["npx", "claude", "--dangerously-skip-permissions"],
+                "fix bug"
+            ),
+            "npx claude --dangerously-skip-permissions 'fix bug'"
+        );
+    }
+
+    #[test]
+    fn ring_append_basic() {
+        let mut buf = Vec::new();
+        ring_append(&mut buf, b"hello");
+        assert_eq!(buf, b"hello");
+    }
+
+    #[test]
+    fn ring_append_stays_within_max() {
+        let mut buf = Vec::new();
+        let chunk = vec![b'a'; RING_MAX / 2 + 100];
+        ring_append(&mut buf, &chunk);
+        ring_append(&mut buf, &chunk);
+        assert!(buf.len() <= RING_MAX);
+    }
+
+    #[test]
+    fn ring_append_trims_oldest_bytes() {
+        let mut buf = Vec::new();
+        ring_append(&mut buf, &vec![b'a'; RING_MAX]);
+        ring_append(&mut buf, b"NEW");
+        assert_eq!(buf.len(), RING_MAX);
+        assert!(buf.ends_with(b"NEW"));
+    }
+
+    #[test]
+    fn ring_append_exact_max_does_not_trim() {
+        let mut buf = Vec::new();
+        ring_append(&mut buf, &vec![b'x'; RING_MAX]);
+        assert_eq!(buf.len(), RING_MAX);
+    }
+}
+
 async fn remove_worktree(repo_path: &str, worktree_path: &std::path::Path) -> anyhow::Result<()> {
     tokio::process::Command::new("git")
         .arg("-C")

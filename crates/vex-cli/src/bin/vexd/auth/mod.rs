@@ -145,3 +145,97 @@ impl TokenStore {
         count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TokenStore;
+
+    fn make_store() -> (tempfile::TempDir, TokenStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        let store = TokenStore::load(path).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn token_id_and_secret_format() {
+        let (_dir, mut store) = make_store();
+        let (token, secret) = store.generate(None, None).unwrap();
+        // token_id: "tok_" + 6 hex chars = 10 chars
+        assert!(token.token_id.starts_with("tok_"));
+        assert_eq!(token.token_id.len(), 10);
+        // secret: 64 hex chars (32 bytes)
+        assert_eq!(secret.len(), 64);
+        assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn validate_correct_secret() {
+        let (_dir, mut store) = make_store();
+        let (token, secret) = store.generate(None, None).unwrap();
+        assert!(store.validate(&token.token_id, &secret));
+    }
+
+    #[test]
+    fn validate_wrong_secret() {
+        let (_dir, mut store) = make_store();
+        let (token, _) = store.generate(None, None).unwrap();
+        let wrong = "a".repeat(64);
+        assert!(!store.validate(&token.token_id, &wrong));
+    }
+
+    #[test]
+    fn validate_unknown_token_id() {
+        let (_dir, mut store) = make_store();
+        store.generate(None, None).unwrap();
+        assert!(!store.validate("tok_000000", &"b".repeat(64)));
+    }
+
+    #[test]
+    fn revoke_removes_token() {
+        let (_dir, mut store) = make_store();
+        let (token, secret) = store.generate(None, None).unwrap();
+        assert!(store.validate(&token.token_id, &secret));
+        assert!(store.revoke(&token.token_id));
+        assert!(!store.validate(&token.token_id, &secret));
+        assert!(!store.revoke(&token.token_id)); // already gone
+    }
+
+    #[test]
+    fn revoke_all_clears_everything() {
+        let (_dir, mut store) = make_store();
+        store.generate(None, None).unwrap();
+        store.generate(None, None).unwrap();
+        assert_eq!(store.list().len(), 2);
+        assert_eq!(store.revoke_all(), 2);
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        let (token_id, secret) = {
+            let mut store = TokenStore::load(path.clone()).unwrap();
+            let (token, secret) = store.generate(Some("laptop".to_string()), None).unwrap();
+            (token.token_id, secret)
+        };
+        // Reload from disk
+        let mut store2 = TokenStore::load(path).unwrap();
+        assert_eq!(store2.list().len(), 1);
+        assert_eq!(store2.list()[0].label.as_deref(), Some("laptop"));
+        assert!(store2.validate(&token_id, &secret));
+    }
+
+    #[test]
+    fn multiple_tokens_validate_independently() {
+        let (_dir, mut store) = make_store();
+        let (tok1, sec1) = store.generate(None, None).unwrap();
+        let (tok2, sec2) = store.generate(None, None).unwrap();
+        assert!(store.validate(&tok1.token_id, &sec1));
+        assert!(store.validate(&tok2.token_id, &sec2));
+        // Cross-validation must fail
+        assert!(!store.validate(&tok1.token_id, &sec2));
+        assert!(!store.validate(&tok2.token_id, &sec1));
+    }
+}

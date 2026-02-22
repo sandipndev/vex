@@ -417,3 +417,107 @@ pub mod framing {
         Ok(serde_json::from_slice(&buf)?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, Response, ShellMsg, VexProtoError, framing};
+
+    #[tokio::test]
+    async fn framing_command_roundtrip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(&mut a, &Command::Status).await.unwrap();
+        let recv: Command = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(recv, Command::Status));
+    }
+
+    #[tokio::test]
+    async fn framing_shell_register_roundtrip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let cmd = Command::ShellRegister {
+            workstream_id: "ws_abc123".to_string(),
+            tmux_window: 7,
+        };
+        framing::send(&mut a, &cmd).await.unwrap();
+        let recv: Command = framing::recv(&mut b).await.unwrap();
+        match recv {
+            Command::ShellRegister {
+                workstream_id,
+                tmux_window,
+            } => {
+                assert_eq!(workstream_id, "ws_abc123");
+                assert_eq!(tmux_window, 7);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_shell_msg_out() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let msg = ShellMsg::Out {
+            data: "aGVsbG8=".to_string(),
+        };
+        framing::send(&mut a, &msg).await.unwrap();
+        let recv: ShellMsg = framing::recv(&mut b).await.unwrap();
+        match recv {
+            ShellMsg::Out { data } => assert_eq!(data, "aGVsbG8="),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_shell_msg_resize() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(
+            &mut a,
+            &ShellMsg::Resize {
+                cols: 120,
+                rows: 40,
+            },
+        )
+        .await
+        .unwrap();
+        let recv: ShellMsg = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(
+            recv,
+            ShellMsg::Resize {
+                cols: 120,
+                rows: 40
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn framing_shell_msg_exited() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(&mut a, &ShellMsg::Exited { code: Some(1) })
+            .await
+            .unwrap();
+        let recv: ShellMsg = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(recv, ShellMsg::Exited { code: Some(1) }));
+    }
+
+    #[tokio::test]
+    async fn framing_response_registered() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let resp = Response::ShellRegistered {
+            shell_id: "sh_aabbcc".to_string(),
+        };
+        framing::send(&mut a, &resp).await.unwrap();
+        let recv: Response = framing::recv(&mut b).await.unwrap();
+        match recv {
+            Response::ShellRegistered { shell_id } => assert_eq!(shell_id, "sh_aabbcc"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_response_error() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(&mut a, &Response::Error(VexProtoError::NotFound))
+            .await
+            .unwrap();
+        let recv: Response = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(recv, Response::Error(VexProtoError::NotFound)));
+    }
+}
