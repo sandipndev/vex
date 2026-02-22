@@ -689,13 +689,10 @@ async fn cmd_agent(action: AgentCmd) -> Result<()> {
                         // with the same binary as our locally configured agent command.
                         // This prevents a compromised/malicious vexd from exec'ing
                         // arbitrary commands in the user's terminal.
-                        let user_cfg =
-                            vex_cli::user_config::UserConfig::load(&vex_home());
+                        let user_cfg = vex_cli::user_config::UserConfig::load(&vex_home());
                         let expected_cmd = user_cfg.agent_command();
-                        let expected_bin =
-                            expected_cmd.split_whitespace().next().unwrap_or("");
-                        let actual_bin =
-                            exec_cmd.split_whitespace().next().unwrap_or("");
+                        let expected_bin = expected_cmd.split_whitespace().next().unwrap_or("");
+                        let actual_bin = exec_cmd.split_whitespace().next().unwrap_or("");
                         if actual_bin != expected_bin {
                             anyhow::bail!(
                                 "daemon returned an unexpected exec command \

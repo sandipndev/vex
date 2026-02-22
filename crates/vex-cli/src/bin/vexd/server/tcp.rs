@@ -80,23 +80,22 @@ pub async fn serve_tcp(
                 Ok(mut tls_stream) => {
                     // Pre-command auth — enforce a timeout so a slow/stalled
                     // client cannot hold a connection open indefinitely.
-                    let auth: vex_proto::AuthToken =
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(30),
-                            vex_proto::framing::recv(&mut tls_stream),
-                        )
-                        .await
-                        {
-                            Ok(Ok(a)) => a,
-                            Ok(Err(e)) => {
-                                tracing::warn!("Auth read error from {peer_addr}: {e}");
-                                return;
-                            }
-                            Err(_) => {
-                                tracing::warn!("Auth timeout from {peer_addr}");
-                                return;
-                            }
-                        };
+                    let auth: vex_proto::AuthToken = match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        vex_proto::framing::recv(&mut tls_stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(a)) => a,
+                        Ok(Err(e)) => {
+                            tracing::warn!("Auth read error from {peer_addr}: {e}");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!("Auth timeout from {peer_addr}");
+                            return;
+                        }
+                    };
 
                     // Log fingerprint of the connecting cert (none for mutual TLS, but we log peer)
                     let token_id = {

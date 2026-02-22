@@ -42,11 +42,8 @@ where
                 // Unix socket — TCP clients must not be able to register a PTY
                 // supervisor (they cannot run vexd-internal processes anyway).
                 if matches!(transport, Transport::Tcp) {
-                    vex_cli::framing::send(
-                        &mut stream,
-                        &Response::Error(VexProtoError::LocalOnly),
-                    )
-                    .await?;
+                    vex_cli::framing::send(&mut stream, &Response::Error(VexProtoError::LocalOnly))
+                        .await?;
                     return Ok(());
                 }
                 return handle_shell_register_streaming(stream, &state, workstream_id, tmux_window)
