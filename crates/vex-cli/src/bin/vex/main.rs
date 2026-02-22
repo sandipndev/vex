@@ -67,6 +67,9 @@ enum Commands {
     /// [internal] Background proxy daemon — do not call directly
     #[command(hide = true)]
     ProxyRun(ProxyRunArgs),
+    /// [internal] Shell PTY supervisor — spawned by vexd inside tmux windows
+    #[command(hide = true)]
+    Shell(ShellArgs),
 }
 
 // ── Subcommand structs ────────────────────────────────────────────────────────
@@ -83,6 +86,16 @@ struct ProxyRunArgs {
     /// Named TCP connection to proxy
     #[arg(long, short = 'c')]
     connection: Option<String>,
+}
+
+#[derive(Args)]
+struct ShellArgs {
+    /// Workstream ID this shell belongs to
+    #[arg(long)]
+    workstream: String,
+    /// tmux window index in the workstream's session
+    #[arg(long)]
+    window: u32,
 }
 
 #[derive(Args)]
@@ -216,6 +229,7 @@ async fn main() -> Result<()> {
         Some(Commands::Start(args)) => cmd_start(args).await,
         Some(Commands::Stop) => cmd_stop(),
         Some(Commands::ProxyRun(args)) => cmd_proxy_run(args).await,
+        Some(Commands::Shell(args)) => cmd_shell(args).await,
         Some(Commands::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
             Ok(())
@@ -1061,6 +1075,143 @@ fn find_tcp_entry(cfg: &Config, name: Option<&str>) -> Result<(String, Connectio
     }
 
     anyhow::bail!("No TCP connection found. Run 'vex connect --host <host:port>' to add one.")
+}
+
+// ── Shell PTY supervisor ──────────────────────────────────────────────────────
+
+async fn cmd_shell(args: ShellArgs) -> Result<()> {
+    use base64::Engine;
+    use std::io::{Read as _, Write as _};
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // Connect directly to the local vexd Unix socket
+    let sock = default_socket_path();
+    let stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .with_context(|| format!("cannot reach vexd at {sock}"))?;
+    let (mut net_read, mut net_write) = tokio::io::split(stream);
+
+    // Register this shell session with vexd
+    vex_proto::framing::send(
+        &mut net_write,
+        &vex_proto::Command::ShellRegister {
+            workstream_id: args.workstream.clone(),
+            tmux_window: args.window,
+        },
+    )
+    .await?;
+
+    let resp: vex_proto::Response = vex_proto::framing::recv(&mut net_read).await?;
+    let shell_id = match resp {
+        vex_proto::Response::ShellRegistered { shell_id } => shell_id,
+        vex_proto::Response::Error(e) => anyhow::bail!("ShellRegister failed: {e:?}"),
+        other => anyhow::bail!("Unexpected response to ShellRegister: {other:?}"),
+    };
+
+    // Determine which shell binary to run
+    let user_cfg = vex_cli::user_config::UserConfig::load(&vex_home());
+    let shell_bin = user_cfg.shell_binary();
+
+    // Open a PTY pair
+    let pty_system = portable_pty::native_pty_system();
+    let pty_pair = pty_system.openpty(portable_pty::PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+
+    // Spawn the shell process inside the PTY slave
+    let mut cmd_builder = portable_pty::CommandBuilder::new(&shell_bin);
+    cmd_builder.env("TERM", "xterm-256color");
+    let mut child = pty_pair.slave.spawn_command(cmd_builder)?;
+    drop(pty_pair.slave); // Drop slave fd after spawn
+
+    // Get writer before cloning the reader (take_writer consumes the write side)
+    let mut pty_writer = pty_pair.master.take_writer()?;
+
+    // Background thread: read PTY output → mpsc channel
+    let (pty_out_tx, mut pty_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    {
+        let mut reader = pty_pair.master.try_clone_reader()?;
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if pty_out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    // Check-child-exited channel
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::channel::<Option<i32>>(1);
+    std::thread::spawn(move || {
+        let code = child.wait().ok().map(|s| s.exit_code() as i32);
+        let _ = exit_tx.blocking_send(code);
+    });
+
+    // Main event loop
+    loop {
+        tokio::select! {
+            biased;
+
+            // Shell process exited
+            Some(code) = exit_rx.recv() => {
+                // Drain remaining PTY output
+                while let Ok(data) = pty_out_rx.try_recv() {
+                    let encoded = b64.encode(&data);
+                    let _ = vex_proto::framing::send(
+                        &mut net_write,
+                        &vex_proto::ShellMsg::Out { data: encoded },
+                    ).await;
+                }
+                let _ = vex_proto::framing::send(
+                    &mut net_write,
+                    &vex_proto::ShellMsg::Exited { code },
+                ).await;
+                break;
+            }
+
+            // PTY produced output → forward to vexd
+            Some(data) = pty_out_rx.recv() => {
+                let encoded = b64.encode(&data);
+                vex_proto::framing::send(
+                    &mut net_write,
+                    &vex_proto::ShellMsg::Out { data: encoded },
+                )
+                .await?;
+            }
+
+            // vexd sent a PTY message (input or resize)
+            msg_result = vex_proto::framing::recv::<_, vex_proto::ShellMsg>(&mut net_read) => {
+                match msg_result? {
+                    vex_proto::ShellMsg::In { data } => {
+                        let bytes = b64.decode(&data)?;
+                        pty_writer.write_all(&bytes)?;
+                    }
+                    vex_proto::ShellMsg::Resize { cols, rows } => {
+                        let _ = pty_pair.master.resize(portable_pty::PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
+                    vex_proto::ShellMsg::Exited { .. } => break,
+                    vex_proto::ShellMsg::Out { .. } => {} // unexpected
+                }
+            }
+        }
+    }
+
+    drop(shell_id); // silence unused warning; used above in ShellRegister
+    Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

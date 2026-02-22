@@ -272,6 +272,27 @@ pub enum Response {
     },
 }
 
+// ── PTY streaming ─────────────────────────────────────────────────────────────
+
+/// Bidirectional PTY streaming message.
+///
+/// Used on two channels:
+/// 1. `vex shell` ↔ vexd: supervisor sends `Out`/`Exited`; vexd sends `In`/`Resize`.
+/// 2. `vex attach` remote client ↔ vexd: vexd sends `Out`/`Exited`; client sends
+///    `In`/`Resize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ShellMsg {
+    /// PTY output bytes (base64-encoded) from shell → vexd → attached clients.
+    Out { data: String },
+    /// PTY input bytes (base64-encoded) from attached client → vexd → shell.
+    In { data: String },
+    /// Terminal resize.
+    Resize { cols: u16, rows: u16 },
+    /// Shell process exited.
+    Exited { code: Option<i32> },
+}
+
 // ── Existing helper types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
