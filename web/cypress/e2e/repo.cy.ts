@@ -24,9 +24,39 @@ function fillAndConnect(host: string, pairing: string) {
 
 describe("Repository listing", () => {
   beforeEach(() => {
+    // Clean up any repos left over from previous tests
+    cy.exec(
+      "docker exec vex-web-test vexd repo list || true"
+    ).then((result) => {
+      const names = result.stdout
+        .split("\n")
+        .map((line) => line.trim().split(/\s+/)[0])
+        .filter((n) => n && n !== "No");
+      for (const name of names) {
+        cy.exec(
+          `docker exec vex-web-test vexd repo unregister ${name}`
+        );
+      }
+    });
+
     cy.visit("/app");
     cy.window().then((win) => win.localStorage.clear());
     cy.reload();
+  });
+
+  it("shows empty state when no repos registered", () => {
+    pairToken().then((pairing) => {
+      fillAndConnect(VEX_HOST, pairing);
+      cy.get("[data-cy=status-version]", { timeout: 10000 }).should(
+        "contain",
+        "vexd v"
+      );
+      cy.get("[data-cy=repos-section]").should("exist");
+      cy.get("[data-cy=repos-empty]").should(
+        "contain",
+        "No repositories registered"
+      );
+    });
   });
 
   it("shows registered repo in web UI", () => {
@@ -44,21 +74,6 @@ describe("Repository listing", () => {
       );
       cy.get("[data-cy=repos-section]").should("exist");
       cy.get("[data-cy=repo-item]").should("contain", "test-repo");
-    });
-  });
-
-  it("shows empty state when no repos registered", () => {
-    pairToken().then((pairing) => {
-      fillAndConnect(VEX_HOST, pairing);
-      cy.get("[data-cy=status-version]", { timeout: 10000 }).should(
-        "contain",
-        "vexd v"
-      );
-      cy.get("[data-cy=repos-section]").should("exist");
-      cy.get("[data-cy=repos-empty]").should(
-        "contain",
-        "No repositories registered"
-      );
     });
   });
 });
