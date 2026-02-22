@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use vex_cli::{
-    Agent, AgentStatus, Command, Repository, Response, Transport, VexProtoError, Workstream,
-    WorkstreamStatus,
+    Agent, AgentStatus, Command, Repository, Response, ShellSession, ShellStatus, Transport,
+    VexProtoError, Workstream, WorkstreamStatus,
 };
 
 use crate::repo_store::{gen_id, next_agent_id, unix_ts};
@@ -209,6 +209,31 @@ async fn dispatch(
                 Some(ws) => Response::AgentList(ws.agents.clone()),
             }
         }
+
+        // ── Shells (implementations added in a later step) ────────────────────
+        Command::ShellSpawn { workstream_id } => handle_shell_spawn(state, workstream_id).await,
+
+        Command::ShellKill { shell_id } => handle_shell_kill(state, shell_id).await,
+
+        Command::ShellList { workstream_id } => {
+            let store = state.repo_store.lock().await;
+            match store.get_workstream(&workstream_id) {
+                None => Response::Error(VexProtoError::NotFound),
+                Some(ws) => Response::ShellList(ws.shells.clone()),
+            }
+        }
+
+        Command::ShellRegister {
+            workstream_id,
+            tmux_window,
+        } => handle_shell_register(state, workstream_id, tmux_window).await,
+
+        Command::AttachShell { shell_id: _ }
+        | Command::DetachShell { shell_id: _ }
+        | Command::PtyInput { .. }
+        | Command::PtyResize { .. } => Response::Error(VexProtoError::Internal(
+            "PTY streaming not yet implemented".into(),
+        )),
     }
 }
 
@@ -442,6 +467,7 @@ async fn handle_workstream_create(
         tmux_session: tmux_session.clone(),
         status: WorkstreamStatus::Idle,
         agents: Vec::new(),
+        shells: Vec::new(),
         created_at: unix_ts(),
     };
 
@@ -796,6 +822,163 @@ async fn check_window_alive(session: &str, window_index: u32) -> bool {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .any(|l| l.trim() == window_index.to_string())
+}
+
+// ── Shell handlers ────────────────────────────────────────────────────────────
+
+async fn handle_shell_spawn(state: &Arc<AppState>, workstream_id: String) -> Response {
+    use crate::repo_store::gen_id;
+
+    let (tmux_session, worktree_path) = {
+        let store = state.repo_store.lock().await;
+        let Some((ri, wi)) = store.ws_indices(&workstream_id) else {
+            return Response::Error(VexProtoError::NotFound);
+        };
+        let ws = &store.repos[ri].workstreams[wi];
+        (ws.tmux_session.clone(), ws.worktree_path.clone())
+    };
+
+    // Create a new tmux window for the shell
+    let shell_id = gen_id("sh");
+    let window_out = tokio::process::Command::new("tmux")
+        .arg("new-window")
+        .arg("-t")
+        .arg(&tmux_session)
+        .arg("-c")
+        .arg(&worktree_path)
+        .arg("-n")
+        .arg(&shell_id)
+        .arg("-P")
+        .arg("-F")
+        .arg("#{window_index}")
+        .output()
+        .await;
+
+    let window_index: u32 = match window_out {
+        Err(e) => return err(format!("tmux new-window failed: {e}")),
+        Ok(o) if !o.status.success() => {
+            return err(format!(
+                "tmux new-window failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ));
+        }
+        Ok(o) => match String::from_utf8_lossy(&o.stdout).trim().parse() {
+            Ok(n) => n,
+            Err(_) => return err("could not parse tmux window index".to_string()),
+        },
+    };
+
+    let shell_bin = state.user_config.shell_binary();
+
+    // Send the shell binary command to the new window
+    let _ = tokio::process::Command::new("tmux")
+        .arg("send-keys")
+        .arg("-t")
+        .arg(format!("{tmux_session}:{window_index}"))
+        .arg(&shell_bin)
+        .arg("Enter")
+        .output()
+        .await;
+
+    let session = ShellSession {
+        id: shell_id.clone(),
+        workstream_id: workstream_id.clone(),
+        tmux_window: window_index,
+        status: ShellStatus::Detached,
+        started_at: unix_ts(),
+        exited_at: None,
+        exit_code: None,
+    };
+
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi)) = store.ws_indices(&workstream_id) {
+            store.repos[ri].workstreams[wi].shells.push(session.clone());
+        }
+        if let Err(e) = store.save() {
+            tracing::error!("persist error after shell spawn: {e}");
+        }
+    }
+
+    tracing::info!("Spawned shell {shell_id} in window {window_index}");
+    Response::ShellSpawned(session)
+}
+
+async fn handle_shell_kill(state: &Arc<AppState>, shell_id: String) -> Response {
+    let (ws_id, tmux_session, window_index) = {
+        let store = state.repo_store.lock().await;
+        let Some((ri, wi, si)) = store.shell_indices(&shell_id) else {
+            return Response::Error(VexProtoError::NotFound);
+        };
+        let ws = &store.repos[ri].workstreams[wi];
+        let sh = &ws.shells[si];
+        (ws.id.clone(), ws.tmux_session.clone(), sh.tmux_window)
+    };
+
+    let _ = tokio::process::Command::new("tmux")
+        .arg("kill-window")
+        .arg("-t")
+        .arg(format!("{tmux_session}:{window_index}"))
+        .output()
+        .await;
+
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi, si)) = store.shell_indices(&shell_id) {
+            let sh = &mut store.repos[ri].workstreams[wi].shells[si];
+            sh.status = ShellStatus::Exited;
+            sh.exited_at = Some(unix_ts());
+        }
+        let _ = ws_id; // used above for future refresh logic
+        if let Err(e) = store.save() {
+            tracing::error!("persist error after shell kill: {e}");
+        }
+    }
+
+    tracing::info!("Killed shell {shell_id}");
+    Response::ShellKilled
+}
+
+async fn handle_shell_register(
+    state: &Arc<AppState>,
+    workstream_id: String,
+    tmux_window: u32,
+) -> Response {
+    use crate::repo_store::gen_id;
+
+    // Check workstream exists
+    {
+        let store = state.repo_store.lock().await;
+        if store.ws_indices(&workstream_id).is_none() {
+            return Response::Error(VexProtoError::NotFound);
+        }
+    }
+
+    let shell_id = gen_id("sh");
+    let session = ShellSession {
+        id: shell_id.clone(),
+        workstream_id: workstream_id.clone(),
+        tmux_window,
+        status: ShellStatus::Active,
+        started_at: unix_ts(),
+        exited_at: None,
+        exit_code: None,
+    };
+
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi)) = store.ws_indices(&workstream_id) {
+            store.repos[ri].workstreams[wi].shells.push(session);
+        }
+        if let Err(e) = store.save() {
+            tracing::error!("persist error after shell register: {e}");
+        }
+    }
+
+    tracing::info!(
+        "Registered shell {shell_id} in workstream {workstream_id} window {tmux_window}"
+    );
+    Response::ShellRegistered { shell_id }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

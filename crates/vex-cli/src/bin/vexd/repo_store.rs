@@ -98,6 +98,20 @@ impl RepoStore {
         None
     }
 
+    // Returns (repo_idx, ws_idx, shell_idx).
+    pub fn shell_indices(&self, shell_id: &str) -> Option<(usize, usize, usize)> {
+        for (ri, repo) in self.repos.iter().enumerate() {
+            for (wi, ws) in repo.workstreams.iter().enumerate() {
+                for (si, sh) in ws.shells.iter().enumerate() {
+                    if sh.id == shell_id {
+                        return Some((ri, wi, si));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Snapshot of a workstream (cheap clone for the response).
     pub fn get_workstream(&self, ws_id: &str) -> Option<&Workstream> {
         let (ri, wi) = self.ws_indices(ws_id)?;

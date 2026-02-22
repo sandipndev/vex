@@ -10,6 +10,8 @@ pub struct UserConfig {
     pub repo: RepoConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub shell: ShellConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -37,6 +39,13 @@ pub struct AgentConfig {
     pub command: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ShellConfig {
+    /// Shell binary to run inside workstream PTY sessions.
+    /// Defaults to `$SHELL` or `/bin/bash` if not set.
+    pub binary: Option<String>,
+}
+
 impl UserConfig {
     pub fn load(vex_home: &Path) -> Self {
         let path = vex_home.join("config.yaml");
@@ -58,5 +67,14 @@ impl UserConfig {
 
     pub fn register_hooks(&self) -> &[Hook] {
         &self.repo.register.hooks
+    }
+
+    /// Shell binary to use for PTY shell sessions.
+    /// Priority: config → $SHELL env var → /bin/bash.
+    pub fn shell_binary(&self) -> String {
+        if let Some(ref bin) = self.shell.binary {
+            return bin.clone();
+        }
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
     }
 }

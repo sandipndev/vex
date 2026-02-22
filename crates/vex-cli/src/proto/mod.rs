@@ -35,7 +35,34 @@ pub struct Workstream {
     pub tmux_session: String,
     pub status: WorkstreamStatus,
     pub agents: Vec<Agent>,
+    /// Active and recent shell sessions in this workstream
+    #[serde(default)]
+    pub shells: Vec<ShellSession>,
     pub created_at: u64,
+}
+
+// ── Shell session ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSession {
+    pub id: String,
+    pub workstream_id: String,
+    /// tmux window index that hosts this shell
+    pub tmux_window: u32,
+    pub status: ShellStatus,
+    pub started_at: u64,
+    pub exited_at: Option<u64>,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ShellStatus {
+    /// Shell is running and accepting PTY I/O
+    Active,
+    /// Shell is running but no client is currently attached
+    Detached,
+    /// Shell process has exited
+    Exited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -138,6 +165,48 @@ pub enum Command {
     AgentList {
         workstream_id: String,
     },
+
+    // ── Shells ────────────────────────────────────────────────────────────────
+    /// Spawn a new shell window in a workstream (creates a new tmux window).
+    ShellSpawn {
+        workstream_id: String,
+    },
+    /// Kill a shell session.
+    ShellKill {
+        shell_id: String,
+    },
+    /// List shell sessions for a workstream.
+    ShellList {
+        workstream_id: String,
+    },
+    /// Sent by `vex shell` to register itself with vexd after launching.
+    ShellRegister {
+        workstream_id: String,
+        tmux_window: u32,
+    },
+    /// Attach to a shell session's PTY stream.
+    /// After the response `ShellAttached`, the connection switches to PTY
+    /// streaming mode: vexd emits `PtyOutput` frames; client sends
+    /// `PtyInput` / `PtyResize` frames.
+    AttachShell {
+        shell_id: String,
+    },
+    /// Detach the current client from a shell session.
+    DetachShell {
+        shell_id: String,
+    },
+    /// Send keyboard input to a shell's PTY (base64-encoded bytes).
+    PtyInput {
+        shell_id: String,
+        /// base64-encoded bytes to write to the PTY master
+        data: String,
+    },
+    /// Resize a shell's PTY.
+    PtyResize {
+        shell_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +247,29 @@ pub enum Response {
     },
     AgentKilled,
     AgentList(Vec<Agent>),
+
+    // ── Shells ────────────────────────────────────────────────────────────────
+    ShellSpawned(ShellSession),
+    ShellKilled,
+    ShellList(Vec<ShellSession>),
+    /// Sent back to `vex shell` after `ShellRegister`; carries the assigned ID.
+    ShellRegistered {
+        shell_id: String,
+    },
+    /// Sent back after `AttachShell`; followed by streaming `PtyOutput` frames.
+    ShellAttached,
+    ShellDetached,
+    /// PTY output from the shell (base64-encoded bytes).
+    PtyOutput {
+        shell_id: String,
+        /// base64-encoded raw terminal bytes
+        data: String,
+    },
+    /// Emitted by vexd when a shell process exits.
+    ShellExited {
+        shell_id: String,
+        code: Option<i32>,
+    },
 }
 
 // ── Existing helper types ─────────────────────────────────────────────────────
