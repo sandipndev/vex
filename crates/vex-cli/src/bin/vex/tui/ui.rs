@@ -218,7 +218,11 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let content = match &app.mode {
         Mode::Normal => {
-            let keys = "↑↓ navigate   enter attach   a agent   c create   s shell   S spawn-shell   d delete   r refresh   q quit";
+            let keys = if app.is_local {
+                "↑↓ navigate   enter attach   a agent   c create   s shell   S spawn-shell   d delete   r refresh   q quit"
+            } else {
+                "↑↓ navigate   enter/s shell (ctrl-] detach)   a agent   c create   S spawn-shell   d delete   r refresh   q quit"
+            };
             let line = if let Some(msg) = &app.status_msg {
                 Line::from(vec![
                     Span::styled(msg.clone(), Style::default().fg(Color::Yellow)),

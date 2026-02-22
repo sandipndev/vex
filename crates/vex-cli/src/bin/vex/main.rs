@@ -2,6 +2,7 @@ use vex_cli as vex_proto;
 
 mod config;
 mod connect;
+mod pty;
 mod tui;
 
 use std::sync::Arc;
@@ -263,8 +264,8 @@ async fn main() -> Result<()> {
     match cli.command {
         None => {
             // No subcommand → open TUI
-            let (conn, label) = open_single_connection(None).await?;
-            tui::run(conn, label).await
+            let (conn, label, entry) = open_single_connection_with_entry(None).await?;
+            tui::run(conn, label, entry).await
         }
         Some(Commands::Connect(args)) => cmd_connect(args).await,
         Some(Commands::Disconnect(args)) => cmd_disconnect(args),
@@ -847,124 +848,17 @@ async fn cmd_attach(args: AttachArgs) -> Result<()> {
     }
 
     // Split stream for bidirectional ShellMsg streaming
-    match conn {
+    let result = match conn {
         Connection::Unix(stream) => {
             let (r, w) = tokio::io::split(stream);
-            pty_attach_remote(r, w).await
+            pty::pty_attach(r, w, None).await?
         }
         Connection::Tcp(stream) => {
             let (r, w) = tokio::io::split(*stream);
-            pty_attach_remote(r, w).await
+            pty::pty_attach(r, w, None).await?
         }
-    }
-}
-
-/// Stream PTY data between the remote shell and the local terminal.
-///
-/// Expects the handshake (AttachShell / ShellAttached) to already be done.
-/// Puts the terminal in raw mode for the duration and restores it on exit.
-async fn pty_attach_remote<R, W>(mut net_read: R, mut net_write: W) -> Result<()>
-where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    use base64::Engine;
-    use tokio::io::AsyncWriteExt;
-
-    let b64 = base64::engine::general_purpose::STANDARD;
-
-    // Send our current terminal size so the remote PTY resizes to match
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    vex_proto::framing::send(&mut net_write, &vex_proto::ShellMsg::Resize { cols, rows }).await?;
-
-    // Stdin reader thread → mpsc channel (raw bytes)
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut stdin = std::io::stdin();
-        let mut buf = [0u8; 1024];
-        loop {
-            match stdin.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    // SIGWINCH → terminal resize events (Unix-only tool)
-    let mut sigwinch =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
-
-    // Put terminal in raw mode; best-effort restore on all exit paths
-    crossterm::terminal::enable_raw_mode()?;
-
-    let mut stdout = tokio::io::stdout();
-    let exit_code: Option<i32>;
-
-    macro_rules! cleanup_return {
-        ($e:expr) => {{
-            crossterm::terminal::disable_raw_mode().ok();
-            return $e;
-        }};
-    }
-
-    loop {
-        tokio::select! {
-            biased;
-
-            // Output / exit from the remote shell
-            msg_result = vex_proto::framing::recv::<_, vex_proto::ShellMsg>(&mut net_read) => {
-                match msg_result {
-                    Err(e) => cleanup_return!(Err(e.into())),
-                    Ok(vex_proto::ShellMsg::Out { data }) => {
-                        match b64.decode(&data) {
-                            Ok(bytes) => {
-                                if let Err(e) = stdout.write_all(&bytes).await {
-                                    cleanup_return!(Err(e.into()));
-                                }
-                                let _ = stdout.flush().await;
-                            }
-                            Err(e) => cleanup_return!(Err(e.into())),
-                        }
-                    }
-                    Ok(vex_proto::ShellMsg::Exited { code }) => {
-                        exit_code = code;
-                        break;
-                    }
-                    Ok(_) => {}
-                }
-            }
-
-            // Keyboard input → remote shell
-            Some(bytes) = stdin_rx.recv() => {
-                let encoded = b64.encode(&bytes);
-                if let Err(e) = vex_proto::framing::send(
-                    &mut net_write,
-                    &vex_proto::ShellMsg::In { data: encoded },
-                ).await {
-                    cleanup_return!(Err(e.into()));
-                }
-            }
-
-            // Terminal resize (SIGWINCH)
-            _ = sigwinch.recv() => {
-                if let Ok((c, r)) = crossterm::terminal::size() {
-                    let _ = vex_proto::framing::send(
-                        &mut net_write,
-                        &vex_proto::ShellMsg::Resize { cols: c, rows: r },
-                    ).await;
-                }
-            }
-        }
-    }
-
-    crossterm::terminal::disable_raw_mode().ok();
-
-    if let Some(code) = exit_code
+    };
+    if let pty::PtyResult::Exited(Some(code)) = result
         && code != 0
     {
         std::process::exit(code);
@@ -1060,6 +954,69 @@ async fn open_single_connection(name: Option<String>) -> Result<(Connection, Str
     let entry = cfg.connections.get_mut(&name).unwrap();
     let conn = Connection::from_entry(entry).await?;
     Ok((conn, name))
+}
+
+/// Like `open_single_connection` but also returns a `ConnectionEntry` that can
+/// be used to open additional connections (e.g. for shell attach).
+async fn open_single_connection_with_entry(
+    name: Option<String>,
+) -> Result<(Connection, String, ConnectionEntry)> {
+    if let Some(ref n) = name {
+        let mut cfg = Config::load()?;
+        let entry = cfg
+            .connections
+            .get_mut(n)
+            .with_context(|| format!("Unknown connection '{n}'. Run 'vex list'."))?;
+        let entry_snapshot = entry.clone();
+        let conn = Connection::from_entry(entry).await?;
+        return Ok((conn, n.clone(), entry_snapshot));
+    }
+
+    // Try local Unix socket
+    let socket_path = default_socket_path();
+    if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+        let mut entry = ConnectionEntry {
+            transport: "unix".to_string(),
+            unix_socket: Some(socket_path),
+            ..Default::default()
+        };
+        let entry_snapshot = entry.clone();
+        let conn = Connection::from_entry(&mut entry).await?;
+        return Ok((conn, "localhost".to_string(), entry_snapshot));
+    }
+
+    // Try proxy socket
+    let proxy_sock = proxy_sock_path();
+    if tokio::net::UnixStream::connect(&proxy_sock).await.is_ok() {
+        let mut entry = ConnectionEntry {
+            transport: "unix".to_string(),
+            unix_socket: Some(proxy_sock),
+            ..Default::default()
+        };
+        let entry_snapshot = entry.clone();
+        let conn = Connection::from_entry(&mut entry).await?;
+        return Ok((conn, "proxy".to_string(), entry_snapshot));
+    }
+
+    // Fall back to configured connections
+    let mut cfg = Config::load()?;
+    if cfg.connections.is_empty() {
+        anyhow::bail!(
+            "No vexd connection available.\n\
+             Start the daemon with 'vexd start', or add a connection with 'vex connect'."
+        );
+    }
+
+    let name = if cfg.connections.contains_key("default") {
+        "default".to_string()
+    } else {
+        cfg.connections.keys().next().cloned().unwrap()
+    };
+
+    let entry = cfg.connections.get_mut(&name).unwrap();
+    let entry_snapshot = entry.clone();
+    let conn = Connection::from_entry(entry).await?;
+    Ok((conn, name, entry_snapshot))
 }
 
 // ── Background connection manager ────────────────────────────────────────────

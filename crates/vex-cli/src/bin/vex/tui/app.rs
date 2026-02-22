@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use vex_cli::{AgentStatus, Repository, WorkstreamStatus};
+use vex_cli::{AgentStatus, Repository, ShellStatus, WorkstreamStatus};
+
+use crate::config::ConnectionEntry;
 
 // ── App mode ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +63,8 @@ pub struct App {
     pub selected_ws: usize,
     /// Whether the connection is local (Unix socket) — affects attach
     pub is_local: bool,
+    /// Connection entry for opening additional connections (e.g. shell attach)
+    pub conn_entry: ConnectionEntry,
     /// Connection label shown in the header
     pub conn_label: String,
     /// Time of last successful refresh
@@ -76,11 +80,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(is_local: bool, conn_label: String) -> Self {
+    pub fn new(is_local: bool, conn_label: String, conn_entry: ConnectionEntry) -> Self {
         Self {
             repos: Vec::new(),
             selected_ws: 0,
             is_local,
+            conn_entry,
             conn_label,
             last_refresh: Instant::now(),
             mode: Mode::Normal,
@@ -132,6 +137,16 @@ impl App {
     pub fn selected_tmux_session(&self) -> Option<String> {
         let (ri, wi) = self.selected()?;
         Some(self.repos[ri].workstreams[wi].tmux_session.clone())
+    }
+
+    /// Returns the ID of the first non-Exited shell in the selected workstream.
+    pub fn selected_first_shell_id(&self) -> Option<String> {
+        let (ri, wi) = self.selected()?;
+        self.repos[ri].workstreams[wi]
+            .shells
+            .iter()
+            .find(|s| s.status != ShellStatus::Exited)
+            .map(|s| s.id.clone())
     }
 
     // ── Data helpers ──────────────────────────────────────────────────────────

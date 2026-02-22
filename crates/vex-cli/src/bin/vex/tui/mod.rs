@@ -11,13 +11,27 @@ use ratatui::DefaultTerminal;
 
 use vex_cli::{Command, Response};
 
+use crate::config::ConnectionEntry;
 use crate::connect::Connection;
+
+/// Ctrl-] — the detach key used when attached to a remote shell from the TUI.
+const DETACH_BYTE: u8 = 0x1D;
 
 // ── TUI entry ─────────────────────────────────────────────────────────────────
 
-pub async fn run(mut conn: Connection, conn_label: String) -> Result<()> {
-    let is_local = conn.is_unix();
-    let mut app = App::new(is_local, conn_label);
+pub async fn run(
+    mut conn: Connection,
+    conn_label: String,
+    conn_entry: ConnectionEntry,
+) -> Result<()> {
+    // Determine is_local via Whoami from the server, not conn.is_unix().
+    // A proxy Unix socket to a remote vexd would be is_unix()==true but
+    // the server knows the truth.
+    let is_local = match whoami(&mut conn).await {
+        Ok(local) => local,
+        Err(_) => conn.is_unix(), // fallback
+    };
+    let mut app = App::new(is_local, conn_label, conn_entry);
 
     // Initial data load
     refresh_repos(&mut conn, &mut app).await;
@@ -26,6 +40,15 @@ pub async fn run(mut conn: Connection, conn_label: String) -> Result<()> {
     let result = event_loop(&mut terminal, &mut app, &mut conn).await;
     ratatui::restore();
     result
+}
+
+async fn whoami(conn: &mut Connection) -> Result<bool> {
+    conn.send(&Command::Whoami).await?;
+    let resp: Response = conn.recv().await?;
+    match resp {
+        Response::ClientInfo(info) => Ok(info.is_local),
+        _ => anyhow::bail!("unexpected Whoami response"),
+    }
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -78,29 +101,31 @@ async fn handle_key(
                 refresh_repos(conn, app).await;
             }
             KeyCode::Enter => {
-                // Attach to full tmux session
-                if let Some(session) = app.selected_tmux_session() {
-                    if app.is_local {
+                // Attach to full tmux session (local) or first shell (remote)
+                if app.is_local {
+                    if let Some(session) = app.selected_tmux_session() {
                         attach_tmux(terminal, &session, None).await?;
                         refresh_repos(conn, app).await;
-                    } else {
-                        app.status_msg = Some(
-                            "Remote connection — tmux attach not available from here".to_string(),
-                        );
                     }
+                } else if let Some(shell_id) = app.selected_first_shell_id() {
+                    attach_shell_remote(terminal, &app.conn_entry, &shell_id).await?;
+                    refresh_repos(conn, app).await;
+                } else {
+                    app.status_msg = Some("No active shell in this workstream".to_string());
                 }
             }
             KeyCode::Char('s') => {
-                // Attach to window 0 (shell)
-                if let Some(session) = app.selected_tmux_session() {
-                    if app.is_local {
+                // Attach to shell: window 0 (local) or first active shell (remote)
+                if app.is_local {
+                    if let Some(session) = app.selected_tmux_session() {
                         attach_tmux(terminal, &session, Some(0)).await?;
                         refresh_repos(conn, app).await;
-                    } else {
-                        app.status_msg = Some(
-                            "Remote connection — tmux attach not available from here".to_string(),
-                        );
                     }
+                } else if let Some(shell_id) = app.selected_first_shell_id() {
+                    attach_shell_remote(terminal, &app.conn_entry, &shell_id).await?;
+                    refresh_repos(conn, app).await;
+                } else {
+                    app.status_msg = Some("No active shell in this workstream".to_string());
                 }
             }
             KeyCode::Char('S') => {
@@ -192,28 +217,31 @@ async fn handle_key(
         } => {
             let ws_id = ws_id.clone();
             let window_index = *window_index;
-            match key {
-                KeyCode::Char('y') | KeyCode::Enter => {
-                    app.mode = Mode::Normal;
-                    // Find tmux session for this workstream
-                    let session = app
-                        .repos
-                        .iter()
-                        .flat_map(|r| &r.workstreams)
-                        .find(|ws| ws.id == ws_id)
-                        .map(|ws| ws.tmux_session.clone());
+            if !app.is_local {
+                // Remote: agents don't have shell supervisors, skip attach offer
+                app.mode = Mode::Normal;
+                app.status_msg = Some("Agent spawned.".to_string());
+            } else {
+                match key {
+                    KeyCode::Char('y') | KeyCode::Enter => {
+                        app.mode = Mode::Normal;
+                        let session = app
+                            .repos
+                            .iter()
+                            .flat_map(|r| &r.workstreams)
+                            .find(|ws| ws.id == ws_id)
+                            .map(|ws| ws.tmux_session.clone());
 
-                    if let Some(session) = session
-                        && app.is_local
-                    {
-                        attach_tmux(terminal, &session, Some(window_index)).await?;
-                        refresh_repos(conn, app).await;
+                        if let Some(session) = session {
+                            attach_tmux(terminal, &session, Some(window_index)).await?;
+                            refresh_repos(conn, app).await;
+                        }
                     }
+                    KeyCode::Char('n') | KeyCode::Esc => {
+                        app.mode = Mode::Normal;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    app.mode = Mode::Normal;
-                }
-                _ => {}
             }
         }
 
@@ -488,6 +516,65 @@ async fn attach_tmux(
         .status();
 
     // Re-initialise ratatui
+    *terminal = ratatui::init();
+    Ok(())
+}
+
+// ── Remote shell attach ───────────────────────────────────────────────────────
+
+/// Open a **new** connection, attach to a shell, and stream PTY data.
+///
+/// A separate connection is needed because shell attach turns the connection
+/// into a streaming `ShellMsg` channel permanently.
+async fn attach_shell_remote(
+    terminal: &mut DefaultTerminal,
+    conn_entry: &ConnectionEntry,
+    shell_id: &str,
+) -> Result<()> {
+    let mut entry = conn_entry.clone();
+    let mut conn = Connection::from_entry(&mut entry).await?;
+
+    conn.send(&Command::AttachShell {
+        shell_id: shell_id.to_string(),
+    })
+    .await?;
+    let resp: Response = conn.recv().await?;
+    match resp {
+        Response::ShellAttached => {}
+        Response::Error(e) => {
+            anyhow::bail!("Attach failed: {e:?}");
+        }
+        other => {
+            anyhow::bail!("Unexpected: {other:?}");
+        }
+    }
+
+    // Suspend TUI
+    ratatui::restore();
+    println!("Connected to shell {shell_id}. Press Ctrl-] to detach.");
+
+    let result = match conn {
+        Connection::Unix(stream) => {
+            let (r, w) = tokio::io::split(stream);
+            crate::pty::pty_attach(r, w, Some(DETACH_BYTE)).await?
+        }
+        Connection::Tcp(stream) => {
+            let (r, w) = tokio::io::split(*stream);
+            crate::pty::pty_attach(r, w, Some(DETACH_BYTE)).await?
+        }
+    };
+
+    match result {
+        crate::pty::PtyResult::Detached => {
+            println!("\r\nDetached from shell.");
+        }
+        crate::pty::PtyResult::Exited(code) => {
+            let code_str = code.map_or("?".to_string(), |c| c.to_string());
+            println!("\r\nShell exited (code {code_str}).");
+        }
+    }
+
+    // Re-init TUI
     *terminal = ratatui::init();
     Ok(())
 }
