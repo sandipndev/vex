@@ -71,6 +71,8 @@
         cargo-watch
         bacon
         bats
+        nodejs_22
+        nodePackages.pnpm
       ];
     in
       with pkgs; {

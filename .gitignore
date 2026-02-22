@@ -10,3 +10,7 @@ result
 .DS_Store
 
 .claude/settings.local.json
+
+# Web frontend
+web/node_modules/
+web/.next/

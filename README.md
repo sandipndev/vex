@@ -130,6 +130,34 @@ You spawn work streams, give them goals, and context-switch freely between them.
 
 ---
 
+## Web Frontend
+
+The `web/` directory contains a Next.js app that provides a browser-based interface to vexd.
+
+```bash
+cd web
+pnpm install
+pnpm dev        # http://localhost:3000
+```
+
+- **Landing page** (`/`) — marketing hero with feature highlights
+- **App** (`/app`) — connect to any vexd daemon with host + pairing token
+- **API proxy** (`/api/vex`) — Next.js API route bridges browser to vexd over TCP+TLS
+
+The browser can't make raw TCP connections, so the API route opens a stateless TCP+TLS connection per request, authenticates, sends the command, and returns the response. This works with Vercel serverless deployment.
+
+### Cypress tests
+
+```bash
+# Requires: Docker, vexd image built
+docker build -t vex-web-test .
+docker run -d --name vex-web-test -p 9422:7422 vex-web-test
+pnpm dev &
+pnpm cy:run
+```
+
+---
+
 ## Non-Goals (v1)
 
 - Vex does not manage cloud VM provisioning — agents run on the machine where Vex is installed
