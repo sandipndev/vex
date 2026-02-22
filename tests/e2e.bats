@@ -71,6 +71,23 @@ vex_pipe() {
     echo "$input" | HOME="$TEST_HOME" "$VEX_BIN" "$@"
 }
 
+# Pipe $1 as stdin into a vexd admin command (for interactive prompts)
+# Usage: vexd_input "<answer>" repo register <path>
+vexd_input() {
+    local input="$1"; shift
+    printf '%s\n' "$input" | HOME="$TEST_HOME" "$VEXD_BIN" "$@"
+}
+
+# Create a minimal git repository with a single empty commit.
+# Usage: make_git_repo <dir> [branch]
+make_git_repo() {
+    local dir="$1"
+    local branch="${2:-main}"
+    git -C "$dir" init -b "$branch" >/dev/null 2>&1
+    git -C "$dir" -c user.email="t@t.com" -c user.name="T" \
+        commit --allow-empty -m "init" >/dev/null 2>&1
+}
+
 # Extract the pairing string from 'vexd pair' output.
 # Prints "tok_<hex>:<hex>" — the only token in that format in the output.
 pair_token() {
@@ -269,4 +286,99 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     # Output should contain results labelled for both connections
     [[ "$output" == *"[local]"* ]]
     [[ "$output" == *"[remote]"* ]]
+}
+
+# ── Repo management ───────────────────────────────────────────────────────────
+
+@test "repo: register appears in repo list" {
+    local repo_dir
+    repo_dir=$(mktemp -d)
+    make_git_repo "$repo_dir" main
+
+    vex connect
+    vexd_input "main" repo register "$repo_dir"
+
+    run vex repo list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$(basename "$repo_dir")"* ]]
+    rm -rf "$repo_dir"
+}
+
+@test "repo: register auto-detects current branch as default when user presses enter" {
+    local repo_dir
+    repo_dir=$(mktemp -d)
+    make_git_repo "$repo_dir" develop
+
+    vex connect
+    # Empty input → accept the auto-detected branch
+    vexd_input "" repo register "$repo_dir"
+
+    run vex repo list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"develop"* ]]
+    rm -rf "$repo_dir"
+}
+
+@test "repo: custom default branch overrides the auto-detected one" {
+    local repo_dir
+    repo_dir=$(mktemp -d)
+    make_git_repo "$repo_dir" main
+
+    vex connect
+    vexd_input "release" repo register "$repo_dir"
+
+    run vex repo list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"release"* ]]
+    rm -rf "$repo_dir"
+}
+
+# ── Workstream management ─────────────────────────────────────────────────────
+
+@test "workstream: create with explicit branch appears in list" {
+    command -v tmux >/dev/null 2>&1 || skip "tmux not available"
+
+    local repo_dir
+    repo_dir=$(mktemp -d)
+    make_git_repo "$repo_dir" main
+    git -C "$repo_dir" checkout -b feature/foo >/dev/null 2>&1
+    git -C "$repo_dir" checkout main >/dev/null 2>&1
+
+    vex connect
+    vexd_input "main" repo register "$repo_dir"
+
+    local repo_id
+    repo_id=$(vex repo list | awk 'NR==2 {print $1}')
+
+    run vex workstream create "$repo_id" --branch feature/foo
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"feature/foo"* ]]
+
+    run vex workstream list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"feature/foo"* ]]
+    rm -rf "$repo_dir"
+}
+
+@test "workstream: create without --branch uses the repo default branch" {
+    command -v tmux >/dev/null 2>&1 || skip "tmux not available"
+
+    local repo_dir
+    repo_dir=$(mktemp -d)
+    make_git_repo "$repo_dir" develop
+    # Switch away from develop so it is not checked out (worktrees cannot
+    # be created on the currently-active branch).
+    git -C "$repo_dir" checkout -b _parked >/dev/null 2>&1
+
+    vex connect
+    # Accept auto-detected branch "develop" as default
+    vexd_input "develop" repo register "$repo_dir"
+
+    local repo_id
+    repo_id=$(vex repo list | awk 'NR==2 {print $1}')
+
+    run vex workstream create "$repo_id"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"develop"* ]]
+    rm -rf "$repo_dir"
 }

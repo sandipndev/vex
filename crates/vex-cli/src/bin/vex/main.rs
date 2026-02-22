@@ -435,9 +435,12 @@ async fn cmd_repo(action: RepoCmd) -> Result<()> {
                         println!("No repositories registered.");
                         return Ok(());
                     }
-                    println!("{:<14} {:<20} PATH", "ID", "NAME");
+                    println!("{:<14} {:<20} {:<15} PATH", "ID", "NAME", "DEFAULT_BRANCH");
                     for repo in &repos {
-                        println!("{:<14} {:<20} {}", repo.id, repo.name, repo.path);
+                        println!(
+                            "{:<14} {:<20} {:<15} {}",
+                            repo.id, repo.name, repo.default_branch, repo.path
+                        );
                     }
                 }
                 other => anyhow::bail!("Unexpected: {other:?}"),
