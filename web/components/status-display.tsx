@@ -39,7 +39,7 @@ export function StatusDisplay() {
           <div className="flex justify-between">
             <span className="text-neutral-400">Version</span>
             <span data-cy="status-version" className="text-white font-mono">
-              {daemonStatus.version}
+              vexd v{daemonStatus.version}
             </span>
           </div>
           <div className="flex justify-between">
