@@ -4,8 +4,11 @@ mod config;
 mod connect;
 mod tui;
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use config::{Config, ConnectionEntry};
@@ -52,14 +55,90 @@ enum Commands {
         #[command(subcommand)]
         action: AgentCmd,
     },
+    /// Attach to a workstream's shell (local: tmux exec; remote: PTY stream)
+    Attach(AttachArgs),
+    /// Start background connection manager (required for remote TCP connections)
+    Start(StartManagerArgs),
+    /// Stop the background connection manager
+    Stop,
     /// Print shell completion script
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
+    /// [internal] Background proxy daemon — do not call directly
+    #[command(hide = true)]
+    ProxyRun(ProxyRunArgs),
+    /// Shell commands
+    Shell {
+        #[command(subcommand)]
+        action: ShellCmd,
+    },
+    /// [internal] Shell PTY supervisor — spawned by vexd inside tmux windows
+    #[command(hide = true, name = "shell-supervisor")]
+    ShellSupervisor(ShellSupervisorArgs),
 }
 
 // ── Subcommand structs ────────────────────────────────────────────────────────
+
+#[derive(Args)]
+struct StartManagerArgs {
+    /// Named TCP connection to proxy (default: first TCP connection in config)
+    #[arg(long, short = 'c')]
+    connection: Option<String>,
+}
+
+#[derive(Args)]
+struct ProxyRunArgs {
+    /// Named TCP connection to proxy
+    #[arg(long, short = 'c')]
+    connection: Option<String>,
+}
+
+#[derive(Args)]
+struct AttachArgs {
+    /// Workstream ID to attach to
+    workstream_id: String,
+    /// Shell ID to attach (default: first active shell in workstream)
+    #[arg(long)]
+    shell: Option<String>,
+    #[command(flatten)]
+    single: Single,
+}
+
+// ── Shell subcommands ─────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum ShellCmd {
+    /// List shell sessions for a workstream
+    List {
+        workstream_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// Spawn a new shell window in a workstream
+    Spawn {
+        workstream_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// Kill a shell session
+    Kill {
+        shell_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+}
+
+#[derive(Args)]
+struct ShellSupervisorArgs {
+    /// Workstream ID this shell belongs to
+    #[arg(long)]
+    workstream: String,
+    /// tmux window index in the workstream's session
+    #[arg(long)]
+    window: u32,
+}
 
 #[derive(Args)]
 struct ConnectArgs {
@@ -189,6 +268,12 @@ async fn main() -> Result<()> {
         Some(Commands::List) => cmd_list(),
         Some(Commands::Status(filter)) => cmd_with_connections(filter, DaemonCmd::Status).await,
         Some(Commands::Whoami(filter)) => cmd_with_connections(filter, DaemonCmd::Whoami).await,
+        Some(Commands::Attach(args)) => cmd_attach(args).await,
+        Some(Commands::Start(args)) => cmd_start(args).await,
+        Some(Commands::Stop) => cmd_stop(),
+        Some(Commands::ProxyRun(args)) => cmd_proxy_run(args).await,
+        Some(Commands::Shell { action }) => cmd_shell_command(action).await,
+        Some(Commands::ShellSupervisor(args)) => cmd_shell_supervisor(args).await,
         Some(Commands::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
             Ok(())
@@ -321,7 +406,13 @@ async fn cmd_with_connections(filter: Filter, cmd: DaemonCmd) -> Result<()> {
         }
         None => {
             if cfg.connections.is_empty() {
-                println!("No connections. Run 'vex connect' to add one.");
+                // No named connections — auto-detect proxy socket or local Unix socket
+                let (mut conn, label) = open_single_connection(None).await?;
+                let result = run_cmd(&mut conn, cmd).await;
+                match result {
+                    Ok(line) => println!("[{label}] {line}"),
+                    Err(e) => anyhow::bail!("{e:#}"),
+                }
                 return Ok(());
             }
             let mut v: Vec<String> = cfg.connections.keys().cloned().collect();
@@ -594,6 +685,22 @@ async fn cmd_agent(action: AgentCmd) -> Result<()> {
                 let resp: vex_proto::Response = conn.recv().await?;
                 match resp {
                     vex_proto::Response::AgentSpawnedInPlace { agent, exec_cmd } => {
+                        // Security: verify the command vexd told us to exec starts
+                        // with the same binary as our locally configured agent command.
+                        // This prevents a compromised/malicious vexd from exec'ing
+                        // arbitrary commands in the user's terminal.
+                        let user_cfg = vex_cli::user_config::UserConfig::load(&vex_home());
+                        let expected_cmd = user_cfg.agent_command();
+                        let expected_bin = expected_cmd.split_whitespace().next().unwrap_or("");
+                        let actual_bin = exec_cmd.split_whitespace().next().unwrap_or("");
+                        if actual_bin != expected_bin {
+                            anyhow::bail!(
+                                "daemon returned an unexpected exec command \
+                                 (expected binary '{}', got '{}'). Aborting.",
+                                expected_bin,
+                                actual_bin
+                            );
+                        }
                         println!("Registered as agent {}. Launching...", agent.id);
                         use std::os::unix::process::CommandExt;
                         let e = std::process::Command::new("sh")
@@ -658,6 +765,208 @@ async fn cmd_agent(action: AgentCmd) -> Result<()> {
     Ok(())
 }
 
+// ── Attach command ────────────────────────────────────────────────────────────
+
+async fn cmd_attach(args: AttachArgs) -> Result<()> {
+    // Local fast-path: if no named connection is given and local vexd is
+    // reachable, exec into `tmux attach-session` directly.
+    if args.single.connection.is_none() {
+        let sock = default_socket_path();
+        if let Ok(stream) = tokio::net::UnixStream::connect(&sock).await {
+            let mut conn = Connection::Unix(stream);
+            conn.send(&vex_proto::Command::WorkstreamList { repo_id: None })
+                .await?;
+            let repos: Vec<vex_proto::Repository> = match conn.recv::<vex_proto::Response>().await?
+            {
+                vex_proto::Response::WorkstreamList(r) => r,
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            };
+            let ws = repos
+                .iter()
+                .flat_map(|r| r.workstreams.iter())
+                .find(|w| w.id == args.workstream_id)
+                .ok_or_else(|| anyhow::anyhow!("Workstream '{}' not found", args.workstream_id))?;
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new("tmux")
+                .arg("attach-session")
+                .arg("-t")
+                .arg(&ws.tmux_session)
+                .exec();
+            return Err(anyhow::anyhow!("exec tmux failed: {err}"));
+        }
+    }
+
+    // Remote path: attach via PTY streaming
+    let (mut conn, _) = open_single_connection(args.single.connection).await?;
+
+    conn.send(&vex_proto::Command::WorkstreamList { repo_id: None })
+        .await?;
+    let repos: Vec<vex_proto::Repository> = match conn.recv::<vex_proto::Response>().await? {
+        vex_proto::Response::WorkstreamList(r) => r,
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected: {other:?}"),
+    };
+    let ws = repos
+        .iter()
+        .flat_map(|r| r.workstreams.iter())
+        .find(|w| w.id == args.workstream_id)
+        .ok_or_else(|| anyhow::anyhow!("Workstream '{}' not found", args.workstream_id))?;
+
+    let shell_id = if let Some(id) = args.shell {
+        id
+    } else {
+        ws.shells
+            .iter()
+            .find(|s| s.status != vex_proto::ShellStatus::Exited)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No active shell in workstream '{}'. \
+                     Shells may still be starting up.",
+                    ws.id
+                )
+            })?
+            .id
+            .clone()
+    };
+
+    conn.send(&vex_proto::Command::AttachShell {
+        shell_id: shell_id.clone(),
+    })
+    .await?;
+    let resp: vex_proto::Response = conn.recv().await?;
+    match resp {
+        vex_proto::Response::ShellAttached => {}
+        vex_proto::Response::Error(e) => anyhow::bail!("Attach failed: {e:?}"),
+        other => anyhow::bail!("Unexpected: {other:?}"),
+    }
+
+    // Split stream for bidirectional ShellMsg streaming
+    match conn {
+        Connection::Unix(stream) => {
+            let (r, w) = tokio::io::split(stream);
+            pty_attach_remote(r, w).await
+        }
+        Connection::Tcp(stream) => {
+            let (r, w) = tokio::io::split(*stream);
+            pty_attach_remote(r, w).await
+        }
+    }
+}
+
+/// Stream PTY data between the remote shell and the local terminal.
+///
+/// Expects the handshake (AttachShell / ShellAttached) to already be done.
+/// Puts the terminal in raw mode for the duration and restores it on exit.
+async fn pty_attach_remote<R, W>(mut net_read: R, mut net_write: W) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // Send our current terminal size so the remote PTY resizes to match
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    vex_proto::framing::send(&mut net_write, &vex_proto::ShellMsg::Resize { cols, rows }).await?;
+
+    // Stdin reader thread → mpsc channel (raw bytes)
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 1024];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // SIGWINCH → terminal resize events (Unix-only tool)
+    let mut sigwinch =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+
+    // Put terminal in raw mode; best-effort restore on all exit paths
+    crossterm::terminal::enable_raw_mode()?;
+
+    let mut stdout = tokio::io::stdout();
+    let exit_code: Option<i32>;
+
+    macro_rules! cleanup_return {
+        ($e:expr) => {{
+            crossterm::terminal::disable_raw_mode().ok();
+            return $e;
+        }};
+    }
+
+    loop {
+        tokio::select! {
+            biased;
+
+            // Output / exit from the remote shell
+            msg_result = vex_proto::framing::recv::<_, vex_proto::ShellMsg>(&mut net_read) => {
+                match msg_result {
+                    Err(e) => cleanup_return!(Err(e.into())),
+                    Ok(vex_proto::ShellMsg::Out { data }) => {
+                        match b64.decode(&data) {
+                            Ok(bytes) => {
+                                if let Err(e) = stdout.write_all(&bytes).await {
+                                    cleanup_return!(Err(e.into()));
+                                }
+                                let _ = stdout.flush().await;
+                            }
+                            Err(e) => cleanup_return!(Err(e.into())),
+                        }
+                    }
+                    Ok(vex_proto::ShellMsg::Exited { code }) => {
+                        exit_code = code;
+                        break;
+                    }
+                    Ok(_) => {}
+                }
+            }
+
+            // Keyboard input → remote shell
+            Some(bytes) = stdin_rx.recv() => {
+                let encoded = b64.encode(&bytes);
+                if let Err(e) = vex_proto::framing::send(
+                    &mut net_write,
+                    &vex_proto::ShellMsg::In { data: encoded },
+                ).await {
+                    cleanup_return!(Err(e.into()));
+                }
+            }
+
+            // Terminal resize (SIGWINCH)
+            _ = sigwinch.recv() => {
+                if let Ok((c, r)) = crossterm::terminal::size() {
+                    let _ = vex_proto::framing::send(
+                        &mut net_write,
+                        &vex_proto::ShellMsg::Resize { cols: c, rows: r },
+                    ).await;
+                }
+            }
+        }
+    }
+
+    crossterm::terminal::disable_raw_mode().ok();
+
+    if let Some(code) = exit_code
+        && code != 0
+    {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
 // ── Tabular helpers ───────────────────────────────────────────────────────────
 
 fn print_workstream_table(repos: &[vex_proto::Repository]) {
@@ -689,7 +998,7 @@ fn print_workstream_table(repos: &[vex_proto::Repository]) {
 
 // ── Connection helpers ────────────────────────────────────────────────────────
 
-/// Open a single connection: try Unix socket first, then named/default config.
+/// Open a single connection: try Unix socket first, then proxy socket, then config.
 /// Returns `(Connection, display_label)`.
 async fn open_single_connection(name: Option<String>) -> Result<(Connection, String)> {
     // If a name was given, use config
@@ -703,7 +1012,7 @@ async fn open_single_connection(name: Option<String>) -> Result<(Connection, Str
         return Ok((conn, n.clone()));
     }
 
-    // Try local Unix socket
+    // Try local Unix socket (direct connection to a local vexd)
     let socket_path = default_socket_path();
     if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
         let mut entry = ConnectionEntry {
@@ -713,6 +1022,18 @@ async fn open_single_connection(name: Option<String>) -> Result<(Connection, Str
         };
         let conn = Connection::from_entry(&mut entry).await?;
         return Ok((conn, "localhost".to_string()));
+    }
+
+    // Try proxy socket created by `vex start` (for TCP connections)
+    let proxy_sock = proxy_sock_path();
+    if tokio::net::UnixStream::connect(&proxy_sock).await.is_ok() {
+        let mut entry = ConnectionEntry {
+            transport: "unix".to_string(),
+            unix_socket: Some(proxy_sock),
+            ..Default::default()
+        };
+        let conn = Connection::from_entry(&mut entry).await?;
+        return Ok((conn, "proxy".to_string()));
     }
 
     // Fall back to configured connections
@@ -734,6 +1055,498 @@ async fn open_single_connection(name: Option<String>) -> Result<(Connection, Str
     let entry = cfg.connections.get_mut(&name).unwrap();
     let conn = Connection::from_entry(entry).await?;
     Ok((conn, name))
+}
+
+// ── Background connection manager ────────────────────────────────────────────
+
+async fn cmd_start(args: StartManagerArgs) -> Result<()> {
+    // 1. Check if already running
+    if let Some(pid) = read_vex_pid()
+        && vex_pid_is_alive(pid)
+    {
+        println!("vex already running (pid {pid})");
+        return Ok(());
+    }
+
+    // 2. Validate a TCP connection exists in config
+    let cfg = Config::load()?;
+    let (name, _) = find_tcp_entry(&cfg, args.connection.as_deref())?;
+
+    // 3. Spawn detached proxy-run child
+    let exe = std::env::current_exe().context("cannot find own executable")?;
+    let home = vex_home();
+    std::fs::create_dir_all(&home)?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(home.join("vex-proxy.log"))
+        .context("opening vex-proxy.log")?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("proxy-run");
+    if let Some(ref c) = args.connection {
+        cmd.args(["--connection", c]);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+
+    // Detach from terminal: start in new session so it survives shell exit
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn().context("failed to spawn vex proxy")?;
+    let pid = child.id();
+    drop(child); // detach without waiting
+
+    // Brief pause to let the child write its PID file and bind the socket
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    if vex_pid_is_alive(pid) {
+        println!("vex started — proxying '{name}' (pid {pid})");
+    } else {
+        anyhow::bail!(
+            "vex proxy failed to start — check {}/vex-proxy.log",
+            home.display()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_stop() -> Result<()> {
+    let pid_path = vex_pid_file();
+    let Some(pid) = read_vex_pid() else {
+        println!("vex not running");
+        return Ok(());
+    };
+    if !vex_pid_is_alive(pid) {
+        println!("vex not running (stale pid file)");
+        let _ = std::fs::remove_file(&pid_path);
+        return Ok(());
+    }
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !vex_pid_is_alive(pid) {
+            let _ = std::fs::remove_file(&pid_path);
+            println!("vex stopped");
+            return Ok(());
+        }
+    }
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let _ = std::fs::remove_file(&pid_path);
+    println!("vex killed");
+    Ok(())
+}
+
+async fn cmd_proxy_run(args: ProxyRunArgs) -> Result<()> {
+    let cfg = Config::load()?;
+    let (name, entry) = find_tcp_entry(&cfg, args.connection.as_deref())?;
+
+    // Write own PID file
+    let home = vex_home();
+    std::fs::create_dir_all(&home)?;
+    let pid = std::process::id();
+    std::fs::write(vex_pid_file(), pid.to_string())?;
+
+    // Remove stale socket if any
+    let sock = proxy_sock_path();
+    let _ = std::fs::remove_file(&sock);
+
+    eprintln!("vex proxy started (pid {pid}), proxying '{name}'");
+
+    run_proxy(entry, sock).await
+}
+
+/// State shared across all proxy client handlers.
+struct ProxyState {
+    entry: ConnectionEntry,
+    conn: Option<Connection>,
+    /// Current backoff duration before the next reconnect attempt.
+    backoff: std::time::Duration,
+    /// Don't try to reconnect until this instant.
+    next_attempt: Option<std::time::Instant>,
+}
+
+impl ProxyState {
+    fn new(entry: ConnectionEntry) -> Self {
+        Self {
+            entry,
+            conn: None,
+            backoff: std::time::Duration::from_secs(1),
+            next_attempt: None,
+        }
+    }
+
+    /// Execute a command through the persistent vexd connection.
+    /// Reconnects (with backoff) if the connection is absent or broken.
+    async fn execute(&mut self, cmd: &vex_proto::Command) -> Result<vex_proto::Response> {
+        // Ensure we have a connection
+        if self.conn.is_none() {
+            if let Some(until) = self.next_attempt {
+                let now = std::time::Instant::now();
+                if now < until {
+                    tokio::time::sleep(until - now).await;
+                }
+            }
+            let mut entry = self.entry.clone();
+            match Connection::from_entry(&mut entry).await {
+                Ok(c) => {
+                    self.conn = Some(c);
+                    self.backoff = std::time::Duration::from_secs(1);
+                    self.next_attempt = None;
+                    eprintln!("vex proxy: connected to vexd");
+                }
+                Err(e) => {
+                    self.next_attempt = Some(std::time::Instant::now() + self.backoff);
+                    self.backoff = (self.backoff * 2).min(std::time::Duration::from_secs(30));
+                    return Err(e);
+                }
+            }
+        }
+
+        let conn = self.conn.as_mut().unwrap();
+        let result: Result<vex_proto::Response> = async {
+            conn.send(cmd).await?;
+            conn.recv().await
+        }
+        .await;
+
+        match result {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                // Mark connection dead; next request will reconnect
+                self.conn = None;
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn run_proxy(entry: ConnectionEntry, sock_path: String) -> Result<()> {
+    let listener =
+        tokio::net::UnixListener::bind(&sock_path).with_context(|| format!("bind {sock_path}"))?;
+    // Restrict proxy socket to owner-only so other local users cannot connect
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    let state = Arc::new(Mutex::new(ProxyState::new(entry)));
+
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+    loop {
+        tokio::select! {
+            res = listener.accept() => {
+                let (client, _) = res?;
+                let st = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_proxy_client(client, st).await {
+                        eprintln!("proxy client error: {e:#}");
+                    }
+                });
+            }
+            _ = sigterm.recv() => {
+                eprintln!("vex proxy: received SIGTERM, shutting down");
+                break;
+            }
+            _ = sigint.recv() => {
+                eprintln!("vex proxy: received SIGINT, shutting down");
+                break;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&sock_path);
+    let _ = std::fs::remove_file(vex_pid_file());
+    Ok(())
+}
+
+async fn handle_proxy_client(
+    mut client: tokio::net::UnixStream,
+    state: Arc<Mutex<ProxyState>>,
+) -> Result<()> {
+    // Read command from client using the shared framing protocol
+    let cmd: vex_proto::Command = vex_proto::framing::recv(&mut client).await?;
+
+    // Forward to vexd
+    let resp = state.lock().await.execute(&cmd).await;
+
+    // Always send a framed response back (errors become protocol-level errors)
+    let resp = resp.unwrap_or_else(|e| {
+        vex_proto::Response::Error(vex_proto::VexProtoError::Internal(e.to_string()))
+    });
+    vex_proto::framing::send(&mut client, &resp).await?;
+
+    Ok(())
+}
+
+// ── Background manager helpers ────────────────────────────────────────────────
+
+fn vex_pid_file() -> std::path::PathBuf {
+    vex_home().join("vex.pid")
+}
+
+fn read_vex_pid() -> Option<u32> {
+    std::fs::read_to_string(vex_pid_file())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+fn vex_pid_is_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+fn proxy_sock_path() -> String {
+    vex_home()
+        .join("vex-client.sock")
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Find a TCP connection entry in config.
+/// Prefers `name` if given, then "default", then any TCP entry.
+fn find_tcp_entry(cfg: &Config, name: Option<&str>) -> Result<(String, ConnectionEntry)> {
+    if let Some(n) = name {
+        let entry = cfg
+            .connections
+            .get(n)
+            .with_context(|| format!("Connection '{n}' not found. Run 'vex list'."))?;
+        if entry.transport != "tcp" {
+            anyhow::bail!("Connection '{n}' is not a TCP connection");
+        }
+        return Ok((n.to_string(), entry.clone()));
+    }
+
+    // Prefer "default" if it's TCP
+    if let Some(entry) = cfg.connections.get("default")
+        && entry.transport == "tcp"
+    {
+        return Ok(("default".to_string(), entry.clone()));
+    }
+
+    // Fall back to first TCP entry
+    for (n, entry) in &cfg.connections {
+        if entry.transport == "tcp" {
+            return Ok((n.clone(), entry.clone()));
+        }
+    }
+
+    anyhow::bail!("No TCP connection found. Run 'vex connect --host <host:port>' to add one.")
+}
+
+// ── Shell subcommand dispatch ──────────────────────────────────────────────────
+
+async fn cmd_shell_command(action: ShellCmd) -> Result<()> {
+    match action {
+        ShellCmd::List {
+            workstream_id,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::ShellList {
+                workstream_id: workstream_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::ShellList(shells) => {
+                    if shells.is_empty() {
+                        println!("No shells in {workstream_id}.");
+                        return Ok(());
+                    }
+                    println!("{:<14} {:<10} {:<8} STARTED", "ID", "STATUS", "WINDOW");
+                    for s in &shells {
+                        let status = format!("{:?}", s.status);
+                        let ago = tui::app::format_ago(s.started_at);
+                        println!("{:<14} {:<10} {:<8} {ago}", s.id, status, s.tmux_window);
+                    }
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        ShellCmd::Spawn {
+            workstream_id,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::ShellSpawn {
+                workstream_id: workstream_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::ShellSpawned(s) => {
+                    println!("Spawned shell {} in tmux window {}", s.id, s.tmux_window);
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        ShellCmd::Kill { shell_id, single } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::ShellKill {
+                shell_id: shell_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::ShellKilled => {
+                    println!("Killed shell {shell_id}.");
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Shell PTY supervisor ──────────────────────────────────────────────────────
+
+async fn cmd_shell_supervisor(args: ShellSupervisorArgs) -> Result<()> {
+    use base64::Engine;
+    use std::io::{Read as _, Write as _};
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // Connect directly to the local vexd Unix socket
+    let sock = default_socket_path();
+    let stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .with_context(|| format!("cannot reach vexd at {sock}"))?;
+    let (mut net_read, mut net_write) = tokio::io::split(stream);
+
+    // Register this shell session with vexd
+    vex_proto::framing::send(
+        &mut net_write,
+        &vex_proto::Command::ShellRegister {
+            workstream_id: args.workstream.clone(),
+            tmux_window: args.window,
+        },
+    )
+    .await?;
+
+    let resp: vex_proto::Response = vex_proto::framing::recv(&mut net_read).await?;
+    let shell_id = match resp {
+        vex_proto::Response::ShellRegistered { shell_id } => shell_id,
+        vex_proto::Response::Error(e) => anyhow::bail!("ShellRegister failed: {e:?}"),
+        other => anyhow::bail!("Unexpected response to ShellRegister: {other:?}"),
+    };
+
+    // Determine which shell binary to run
+    let user_cfg = vex_cli::user_config::UserConfig::load(&vex_home());
+    let shell_bin = user_cfg.shell_binary();
+
+    // Open a PTY pair
+    let pty_system = portable_pty::native_pty_system();
+    let pty_pair = pty_system.openpty(portable_pty::PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+
+    // Spawn the shell process inside the PTY slave
+    let mut cmd_builder = portable_pty::CommandBuilder::new(&shell_bin);
+    cmd_builder.env("TERM", "xterm-256color");
+    let mut child = pty_pair.slave.spawn_command(cmd_builder)?;
+    drop(pty_pair.slave); // Drop slave fd after spawn
+
+    // Get writer before cloning the reader (take_writer consumes the write side)
+    let mut pty_writer = pty_pair.master.take_writer()?;
+
+    // Background thread: read PTY output → mpsc channel
+    let (pty_out_tx, mut pty_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    {
+        let mut reader = pty_pair.master.try_clone_reader()?;
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if pty_out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    // Check-child-exited channel
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::channel::<Option<i32>>(1);
+    std::thread::spawn(move || {
+        let code = child.wait().ok().map(|s| s.exit_code() as i32);
+        let _ = exit_tx.blocking_send(code);
+    });
+
+    // Main event loop
+    loop {
+        tokio::select! {
+            biased;
+
+            // Shell process exited
+            Some(code) = exit_rx.recv() => {
+                // Drain remaining PTY output
+                while let Ok(data) = pty_out_rx.try_recv() {
+                    let encoded = b64.encode(&data);
+                    let _ = vex_proto::framing::send(
+                        &mut net_write,
+                        &vex_proto::ShellMsg::Out { data: encoded },
+                    ).await;
+                }
+                let _ = vex_proto::framing::send(
+                    &mut net_write,
+                    &vex_proto::ShellMsg::Exited { code },
+                ).await;
+                break;
+            }
+
+            // PTY produced output → forward to vexd
+            Some(data) = pty_out_rx.recv() => {
+                let encoded = b64.encode(&data);
+                vex_proto::framing::send(
+                    &mut net_write,
+                    &vex_proto::ShellMsg::Out { data: encoded },
+                )
+                .await?;
+            }
+
+            // vexd sent a PTY message (input or resize)
+            msg_result = vex_proto::framing::recv::<_, vex_proto::ShellMsg>(&mut net_read) => {
+                match msg_result? {
+                    vex_proto::ShellMsg::In { data } => {
+                        let bytes = b64.decode(&data)?;
+                        pty_writer.write_all(&bytes)?;
+                    }
+                    vex_proto::ShellMsg::Resize { cols, rows } => {
+                        let _ = pty_pair.master.resize(portable_pty::PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
+                    vex_proto::ShellMsg::Exited { .. } => break,
+                    vex_proto::ShellMsg::Out { .. } => {} // unexpected
+                }
+            }
+        }
+    }
+
+    drop(shell_id); // silence unused warning; used above in ShellRegister
+    Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

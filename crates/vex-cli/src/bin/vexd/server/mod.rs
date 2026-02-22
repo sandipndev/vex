@@ -7,9 +7,11 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use vex_cli::{
-    Agent, AgentStatus, Command, Repository, Response, Transport, VexProtoError, Workstream,
-    WorkstreamStatus,
+    Agent, AgentStatus, Command, Repository, Response, ShellMsg, ShellSession, ShellStatus,
+    Transport, VexProtoError, Workstream, WorkstreamStatus,
 };
+
+use crate::state::ShellRuntime;
 
 use crate::repo_store::{gen_id, next_agent_id, unix_ts};
 use crate::state::AppState;
@@ -25,13 +27,49 @@ pub async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Drop idle connections after 5 minutes with no command, preventing
+    // authenticated clients from holding file descriptors open indefinitely.
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
     loop {
-        let cmd: Command = match vex_cli::framing::recv(&mut stream).await {
-            Ok(c) => c,
-            Err(_) => break,
-        };
-        let response = dispatch(cmd, &state, &transport, &token_id).await;
-        vex_cli::framing::send(&mut stream, &response).await?;
+        let cmd: Command =
+            match tokio::time::timeout(IDLE_TIMEOUT, vex_cli::framing::recv(&mut stream)).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(_)) => break, // client disconnected / framing error
+                Err(_) => break,     // idle timeout
+            };
+        // Streaming commands consume the connection — handle before dispatch
+        match cmd {
+            Command::ShellRegister {
+                workstream_id,
+                tmux_window,
+            } => {
+                // Shell supervisor registration is only allowed over the local
+                // Unix socket — TCP clients must not be able to register a PTY
+                // supervisor (they cannot run vexd-internal processes anyway).
+                if matches!(transport, Transport::Tcp) {
+                    vex_cli::framing::send(&mut stream, &Response::Error(VexProtoError::LocalOnly))
+                        .await?;
+                    return Ok(());
+                }
+                return handle_shell_register_streaming(stream, &state, workstream_id, tmux_window)
+                    .await;
+            }
+            Command::AttachShell { shell_id } => {
+                // Shell attach streams PTY output — restrict to local Unix socket
+                // so remote TCP clients cannot snoop on interactive shell sessions.
+                if matches!(transport, Transport::Tcp) {
+                    vex_cli::framing::send(&mut stream, &Response::Error(VexProtoError::LocalOnly))
+                        .await?;
+                    return Ok(());
+                }
+                return handle_shell_attach_streaming(stream, &state, shell_id).await;
+            }
+            cmd => {
+                let response = dispatch(cmd, &state, &transport, &token_id).await;
+                vex_cli::framing::send(&mut stream, &response).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -209,6 +247,31 @@ async fn dispatch(
                 Some(ws) => Response::AgentList(ws.agents.clone()),
             }
         }
+
+        // ── Shells (implementations added in a later step) ────────────────────
+        Command::ShellSpawn { workstream_id } => handle_shell_spawn(state, workstream_id).await,
+
+        Command::ShellKill { shell_id } => handle_shell_kill(state, shell_id).await,
+
+        Command::ShellList { workstream_id } => {
+            let store = state.repo_store.lock().await;
+            match store.get_workstream(&workstream_id) {
+                None => Response::Error(VexProtoError::NotFound),
+                Some(ws) => Response::ShellList(ws.shells.clone()),
+            }
+        }
+
+        // ShellRegister and AttachShell are intercepted in handle_connection
+        // before dispatch is called; these arms are unreachable in practice.
+        Command::ShellRegister { .. } | Command::AttachShell { .. } => Response::Error(
+            VexProtoError::Internal("unexpected streaming command".into()),
+        ),
+
+        Command::DetachShell { shell_id: _ }
+        | Command::PtyInput { .. }
+        | Command::PtyResize { .. } => Response::Error(VexProtoError::Internal(
+            "PTY streaming not yet implemented".into(),
+        )),
     }
 }
 
@@ -424,12 +487,24 @@ async fn handle_workstream_create(
         return err("tmux new-session failed".to_string());
     }
 
-    // Rename window 0 → "shell"
+    // Rename window 0 → "shell" and launch the PTY supervisor
     let _ = tokio::process::Command::new("tmux")
         .arg("rename-window")
         .arg("-t")
         .arg(format!("{tmux_session}:0"))
         .arg("shell")
+        .output()
+        .await;
+
+    // Spawn `vex shell-supervisor` in window 0 so it registers with vexd as a PTY supervisor.
+    let _ = tokio::process::Command::new("tmux")
+        .arg("send-keys")
+        .arg("-t")
+        .arg(format!("{tmux_session}:0"))
+        .arg(format!(
+            "vex shell-supervisor --workstream {ws_id} --window 0"
+        ))
+        .arg("Enter")
         .output()
         .await;
 
@@ -442,6 +517,7 @@ async fn handle_workstream_create(
         tmux_session: tmux_session.clone(),
         status: WorkstreamStatus::Idle,
         agents: Vec::new(),
+        shells: Vec::new(),
         created_at: unix_ts(),
     };
 
@@ -798,6 +874,363 @@ async fn check_window_alive(session: &str, window_index: u32) -> bool {
         .any(|l| l.trim() == window_index.to_string())
 }
 
+// ── Shell handlers ────────────────────────────────────────────────────────────
+
+async fn handle_shell_spawn(state: &Arc<AppState>, workstream_id: String) -> Response {
+    use crate::repo_store::gen_id;
+
+    let (tmux_session, worktree_path) = {
+        let store = state.repo_store.lock().await;
+        let Some((ri, wi)) = store.ws_indices(&workstream_id) else {
+            return Response::Error(VexProtoError::NotFound);
+        };
+        let ws = &store.repos[ri].workstreams[wi];
+        (ws.tmux_session.clone(), ws.worktree_path.clone())
+    };
+
+    // Create a new tmux window for the shell
+    let shell_id = gen_id("sh");
+    let window_out = tokio::process::Command::new("tmux")
+        .arg("new-window")
+        .arg("-t")
+        .arg(&tmux_session)
+        .arg("-c")
+        .arg(&worktree_path)
+        .arg("-n")
+        .arg(&shell_id)
+        .arg("-P")
+        .arg("-F")
+        .arg("#{window_index}")
+        .output()
+        .await;
+
+    let window_index: u32 = match window_out {
+        Err(e) => return err(format!("tmux new-window failed: {e}")),
+        Ok(o) if !o.status.success() => {
+            return err(format!(
+                "tmux new-window failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ));
+        }
+        Ok(o) => match String::from_utf8_lossy(&o.stdout).trim().parse() {
+            Ok(n) => n,
+            Err(_) => return err("could not parse tmux window index".to_string()),
+        },
+    };
+
+    // Launch `vex shell-supervisor` PTY supervisor in the new window
+    let _ = tokio::process::Command::new("tmux")
+        .arg("send-keys")
+        .arg("-t")
+        .arg(format!("{tmux_session}:{window_index}"))
+        .arg(format!(
+            "vex shell-supervisor --workstream {workstream_id} --window {window_index}"
+        ))
+        .arg("Enter")
+        .output()
+        .await;
+
+    let session = ShellSession {
+        id: shell_id.clone(),
+        workstream_id: workstream_id.clone(),
+        tmux_window: window_index,
+        status: ShellStatus::Detached,
+        started_at: unix_ts(),
+        exited_at: None,
+        exit_code: None,
+    };
+
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi)) = store.ws_indices(&workstream_id) {
+            store.repos[ri].workstreams[wi].shells.push(session.clone());
+        }
+        if let Err(e) = store.save() {
+            tracing::error!("persist error after shell spawn: {e}");
+        }
+    }
+
+    tracing::info!("Spawned shell {shell_id} in window {window_index}");
+    Response::ShellSpawned(session)
+}
+
+async fn handle_shell_kill(state: &Arc<AppState>, shell_id: String) -> Response {
+    let (ws_id, tmux_session, window_index) = {
+        let store = state.repo_store.lock().await;
+        let Some((ri, wi, si)) = store.shell_indices(&shell_id) else {
+            return Response::Error(VexProtoError::NotFound);
+        };
+        let ws = &store.repos[ri].workstreams[wi];
+        let sh = &ws.shells[si];
+        (ws.id.clone(), ws.tmux_session.clone(), sh.tmux_window)
+    };
+
+    let _ = tokio::process::Command::new("tmux")
+        .arg("kill-window")
+        .arg("-t")
+        .arg(format!("{tmux_session}:{window_index}"))
+        .output()
+        .await;
+
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi, si)) = store.shell_indices(&shell_id) {
+            let sh = &mut store.repos[ri].workstreams[wi].shells[si];
+            sh.status = ShellStatus::Exited;
+            sh.exited_at = Some(unix_ts());
+        }
+        let _ = ws_id; // used above for future refresh logic
+        if let Err(e) = store.save() {
+            tracing::error!("persist error after shell kill: {e}");
+        }
+    }
+
+    tracing::info!("Killed shell {shell_id}");
+    Response::ShellKilled
+}
+
+// ── PTY streaming ─────────────────────────────────────────────────────────────
+
+const RING_MAX: usize = 10_000;
+
+fn ring_append(buf: &mut Vec<u8>, data: &[u8]) {
+    buf.extend_from_slice(data);
+    if buf.len() > RING_MAX {
+        let excess = buf.len() - RING_MAX;
+        buf.drain(..excess);
+    }
+}
+
+/// Upgrade a connection to PTY supervisor mode after `ShellRegister`.
+///
+/// Creates a `ShellRuntime`, persists the `ShellSession`, then enters a
+/// bidirectional `ShellMsg` streaming loop:
+/// - `ShellMsg::Out` from supervisor → ring buffer + broadcast to clients
+/// - `ShellMsg::Exited` from supervisor → broadcast + cleanup
+/// - `ShellMsg::In` / `Resize` from clients (via `input_rx`) → supervisor
+async fn handle_shell_register_streaming<S>(
+    stream: S,
+    state: &Arc<AppState>,
+    workstream_id: String,
+    tmux_window: u32,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // Validate workstream
+    {
+        let store = state.repo_store.lock().await;
+        if store.ws_indices(&workstream_id).is_none() {
+            drop(store);
+            let mut s = stream;
+            let _ = vex_cli::framing::send(&mut s, &Response::Error(VexProtoError::NotFound)).await;
+            return Ok(());
+        }
+    }
+
+    let shell_id = gen_id("sh");
+
+    // Build ShellRuntime
+    let (broadcast_tx, _initial_rx) = tokio::sync::broadcast::channel::<ShellMsg>(256);
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<ShellMsg>(256);
+    drop(_initial_rx); // clients subscribe() to get their own receivers
+
+    let runtime = Arc::new(ShellRuntime {
+        output_buf: tokio::sync::Mutex::new(Vec::new()),
+        broadcast_tx,
+        input_tx,
+    });
+
+    // Persist ShellSession
+    let session = ShellSession {
+        id: shell_id.clone(),
+        workstream_id: workstream_id.clone(),
+        tmux_window,
+        status: ShellStatus::Active,
+        started_at: unix_ts(),
+        exited_at: None,
+        exit_code: None,
+    };
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi)) = store.ws_indices(&workstream_id) {
+            store.repos[ri].workstreams[wi].shells.push(session);
+        }
+        let _ = store.save();
+    }
+
+    state
+        .shell_runtimes
+        .lock()
+        .await
+        .insert(shell_id.clone(), Arc::clone(&runtime));
+
+    // Acknowledge registration
+    let (mut net_read, mut net_write) = tokio::io::split(stream);
+    vex_cli::framing::send(
+        &mut net_write,
+        &Response::ShellRegistered {
+            shell_id: shell_id.clone(),
+        },
+    )
+    .await?;
+
+    tracing::info!("Shell supervisor {shell_id} connected (workstream {workstream_id})");
+
+    let mut exit_code: Option<i32> = None;
+    loop {
+        tokio::select! {
+            biased;
+
+            // Message from supervisor (PTY output or exit notification)
+            msg_result = vex_cli::framing::recv::<_, ShellMsg>(&mut net_read) => {
+                match msg_result {
+                    Ok(ShellMsg::Out { data }) => {
+                        if let Ok(raw) = b64.decode(&data) {
+                            let mut buf = runtime.output_buf.lock().await;
+                            ring_append(&mut buf, &raw);
+                        }
+                        let _ = runtime.broadcast_tx.send(ShellMsg::Out { data });
+                    }
+                    Ok(ShellMsg::Exited { code }) => {
+                        exit_code = code;
+                        let _ = runtime.broadcast_tx.send(ShellMsg::Exited { code });
+                        break;
+                    }
+                    Ok(_) => {} // unexpected from supervisor
+                    Err(_) => {
+                        // Supervisor disconnected unexpectedly
+                        let _ = runtime.broadcast_tx.send(ShellMsg::Exited { code: None });
+                        break;
+                    }
+                }
+            }
+
+            // Input / resize from an attached client → forward to supervisor
+            Some(msg) = input_rx.recv() => {
+                if vex_cli::framing::send(&mut net_write, &msg).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    state.shell_runtimes.lock().await.remove(&shell_id);
+    {
+        let mut store = state.repo_store.lock().await;
+        if let Some((ri, wi, si)) = store.shell_indices(&shell_id) {
+            let sh = &mut store.repos[ri].workstreams[wi].shells[si];
+            sh.status = ShellStatus::Exited;
+            sh.exited_at = Some(unix_ts());
+            sh.exit_code = exit_code;
+        }
+        let _ = store.save();
+    }
+
+    tracing::info!("Shell {shell_id} exited (code={exit_code:?})");
+    Ok(())
+}
+
+/// Upgrade a connection to PTY client mode after `AttachShell`.
+///
+/// Replays the ring buffer, subscribes to live output, and forwards
+/// client keyboard input / resize events to the PTY supervisor.
+async fn handle_shell_attach_streaming<S>(
+    stream: S,
+    state: &Arc<AppState>,
+    shell_id: String,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // Look up the runtime (supervisor must have registered first)
+    let runtime = state.shell_runtimes.lock().await.get(&shell_id).cloned();
+
+    let runtime = match runtime {
+        Some(r) => r,
+        None => {
+            let mut s = stream;
+            let _ = vex_cli::framing::send(&mut s, &Response::Error(VexProtoError::NotFound)).await;
+            return Ok(());
+        }
+    };
+
+    let (mut net_read, mut net_write) = tokio::io::split(stream);
+
+    // Acknowledge attach
+    vex_cli::framing::send(&mut net_write, &Response::ShellAttached).await?;
+
+    // Replay scrollback
+    {
+        let buf = runtime.output_buf.lock().await;
+        if !buf.is_empty() {
+            let encoded = b64.encode(&*buf);
+            vex_cli::framing::send(&mut net_write, &ShellMsg::Out { data: encoded }).await?;
+        }
+    }
+
+    // Subscribe to live output and clone the input sender
+    let mut broadcast_rx = runtime.broadcast_tx.subscribe();
+    let input_tx = runtime.input_tx.clone();
+
+    tracing::info!("Client attached to shell {shell_id}");
+
+    loop {
+        tokio::select! {
+            biased;
+
+            // Live output from supervisor → client
+            msg = broadcast_rx.recv() => {
+                match msg {
+                    Ok(shell_msg) => {
+                        let is_exit = matches!(shell_msg, ShellMsg::Exited { .. });
+                        vex_cli::framing::send(&mut net_write, &shell_msg).await?;
+                        if is_exit {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Re-sync: replay the current ring buffer
+                        let buf = runtime.output_buf.lock().await;
+                        if !buf.is_empty() {
+                            let encoded = b64.encode(&*buf);
+                            let _ = vex_cli::framing::send(
+                                &mut net_write,
+                                &ShellMsg::Out { data: encoded },
+                            )
+                            .await;
+                        }
+                    }
+                    Err(_) => break, // supervisor gone
+                }
+            }
+
+            // Input / resize from client → supervisor
+            msg_result = vex_cli::framing::recv::<_, ShellMsg>(&mut net_read) => {
+                match msg_result {
+                    Ok(msg) => match &msg {
+                        ShellMsg::In { .. } | ShellMsg::Resize { .. } => {
+                            let _ = input_tx.send(msg).await;
+                        }
+                        _ => break, // client sent unexpected message
+                    },
+                    Err(_) => break, // client disconnected
+                }
+            }
+        }
+    }
+
+    tracing::info!("Client detached from shell {shell_id}");
+    Ok(())
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn err(msg: String) -> Response {
@@ -825,4 +1258,77 @@ async fn remove_worktree(repo_path: &str, worktree_path: &std::path::Path) -> an
         .output()
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RING_MAX, build_send_keys_cmd, ring_append};
+
+    #[test]
+    fn build_cmd_empty_prompt_returns_base_command() {
+        assert_eq!(
+            build_send_keys_cmd(&["claude", "--model", "sonnet"], ""),
+            "claude --model sonnet"
+        );
+    }
+
+    #[test]
+    fn build_cmd_simple_prompt() {
+        assert_eq!(
+            build_send_keys_cmd(&["claude"], "write a test"),
+            "claude 'write a test'"
+        );
+    }
+
+    #[test]
+    fn build_cmd_prompt_with_single_quotes() {
+        // Single quotes in prompt must be escaped for shell safety
+        assert_eq!(
+            build_send_keys_cmd(&["claude"], "it's a test"),
+            "claude 'it'\\''s a test'"
+        );
+    }
+
+    #[test]
+    fn build_cmd_multi_word_base() {
+        assert_eq!(
+            build_send_keys_cmd(
+                &["npx", "claude", "--dangerously-skip-permissions"],
+                "fix bug"
+            ),
+            "npx claude --dangerously-skip-permissions 'fix bug'"
+        );
+    }
+
+    #[test]
+    fn ring_append_basic() {
+        let mut buf = Vec::new();
+        ring_append(&mut buf, b"hello");
+        assert_eq!(buf, b"hello");
+    }
+
+    #[test]
+    fn ring_append_stays_within_max() {
+        let mut buf = Vec::new();
+        let chunk = vec![b'a'; RING_MAX / 2 + 100];
+        ring_append(&mut buf, &chunk);
+        ring_append(&mut buf, &chunk);
+        assert!(buf.len() <= RING_MAX);
+    }
+
+    #[test]
+    fn ring_append_trims_oldest_bytes() {
+        let mut buf = Vec::new();
+        ring_append(&mut buf, &vec![b'a'; RING_MAX]);
+        ring_append(&mut buf, b"NEW");
+        assert_eq!(buf.len(), RING_MAX);
+        assert!(buf.ends_with(b"NEW"));
+    }
+
+    #[test]
+    fn ring_append_exact_max_does_not_trim() {
+        let mut buf = Vec::new();
+        ring_append(&mut buf, &vec![b'x'; RING_MAX]);
+        assert_eq!(buf.len(), RING_MAX);
+    }
 }

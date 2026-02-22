@@ -33,12 +33,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the daemon
-    Start(StartArgs),
-    /// Stop a running daemon
+    /// Start the daemon in the background
+    Start,
+    /// Stop the running daemon
     Stop,
-    /// Restart the daemon (stop then start)
-    Restart(StartArgs),
+    /// Restart the daemon
+    Restart,
     /// Print daemon status
     Status,
     /// Tail the daemon log
@@ -55,18 +55,19 @@ enum Commands {
         #[command(subcommand)]
         action: RepoCmd,
     },
+    /// Run daemon in the foreground (for use by service managers)
+    #[command(hide = true)]
+    StartForeground,
     /// Print shell completion script
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
-}
-
-#[derive(Args, Clone)]
-struct StartArgs {
-    /// Detach and run in the background
-    #[arg(long)]
-    daemon: bool,
+    /// Manage system service integration
+    Svc {
+        #[command(subcommand)]
+        action: SvcCmd,
+    },
 }
 
 #[derive(Args)]
@@ -102,6 +103,16 @@ enum RepoCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SvcCmd {
+    /// Install and start the system service
+    Enable,
+    /// Stop and remove the system service
+    Disable,
+    /// Show system service status
+    Status,
+}
+
 // ── Path helpers ─────────────────────────────────────────────────────────────
 
 fn daemon_dir() -> Result<PathBuf> {
@@ -112,48 +123,57 @@ fn admin_socket_path() -> Result<PathBuf> {
     Ok(daemon_dir()?.join("vexd.sock"))
 }
 
+fn pid_file() -> Result<PathBuf> {
+    Ok(daemon_dir()?.join("vexd.pid"))
+}
+
+// ── PID helpers ───────────────────────────────────────────────────────────────
+
+/// Read the stored PID, or None if the file is absent / unreadable.
+fn read_pid() -> Option<u32> {
+    pid_file()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Return true if a process with `pid` is alive (kill -0).
+fn pid_is_alive(pid: u32) -> bool {
+    // Safety: we are only sending signal 0, which probes existence.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
 // ── Entry point ─────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Start(args) => setup_and_launch(args),
+        Commands::Start => do_start(),
 
-        Commands::Restart(args) => {
+        Commands::StartForeground => run_foreground(),
+
+        Commands::Restart => {
             if let Err(e) = do_stop() {
                 eprintln!("stop: {e}");
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            setup_and_launch(args)
+            do_start()
         }
 
         Commands::Stop => do_stop(),
 
-        Commands::Status => tokio::runtime::Runtime::new()?.block_on(async {
-            let sock = admin_socket_path()?;
-            match local::send_command(&sock, &vex_proto::Command::Status).await? {
-                vex_proto::Response::DaemonStatus(s) => {
-                    println!("vexd v{}", s.version);
-                    println!("uptime:  {}s", s.uptime_secs);
-                    println!("clients: {}", s.connected_clients);
-                }
-                other => println!("{other:?}"),
-            }
-            Ok(())
-        }),
+        Commands::Status => do_status(),
 
         Commands::Logs => {
             let log_path = daemon_dir()?.join("vexd.log");
             if !log_path.exists() {
                 anyhow::bail!("Log file not found: {}", log_path.display());
             }
-            std::process::Command::new("tail")
-                .arg("-f")
-                .arg(&log_path)
-                .status()
-                .context("failed to run tail")?;
-            Ok(())
+            // exec into tail — replaces this process
+            let err = std::os::unix::process::CommandExt::exec(
+                std::process::Command::new("tail").arg("-f").arg(&log_path),
+            );
+            Err(err.into())
         }
 
         Commands::Pair(args) => tokio::runtime::Runtime::new()?.block_on(async {
@@ -291,35 +311,129 @@ fn main() -> Result<()> {
             }
             Ok(())
         }),
+
+        Commands::Svc { action } => cmd_svc(action),
     }
 }
 
-// ── Daemon launch (shared by Start and Restart) ──────────────────────────────
+// ── Start / stop / status ────────────────────────────────────────────────────
 
-fn setup_and_launch(args: &StartArgs) -> Result<()> {
+fn do_start() -> Result<()> {
+    // Check if already running
+    if let Some(pid) = read_pid()
+        && pid_is_alive(pid)
+    {
+        println!("vexd already running (pid {pid})");
+        return Ok(());
+    }
+
     let daemon_dir = daemon_dir()?;
     std::fs::create_dir_all(&daemon_dir)?;
+    // Restrict daemon dir so other local users cannot traverse into it
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::create_dir_all(daemon_dir.join("tls"))?;
 
-    if args.daemon {
-        let log = open_log(&daemon_dir)?;
-        Daemonize::new()
-            .pid_file(daemon_dir.join("vexd.pid"))
-            .stdout(log.try_clone()?)
-            .stderr(log)
-            .start()
-            .context("daemonize failed")?;
-        // We are now in the daemon child process.
-    } else {
-        std::fs::write(daemon_dir.join("vexd.pid"), std::process::id().to_string())
-            .context("writing PID file")?;
-    }
+    let log = open_log(&daemon_dir)?;
+    Daemonize::new()
+        .pid_file(daemon_dir.join("vexd.pid"))
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .start()
+        .context("daemonize failed")?;
+    // We are now in the daemon child process.
 
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;
 
     tokio::runtime::Runtime::new()?.block_on(run_daemon(vex_home()))
+}
+
+/// Run in the foreground — used by systemd/launchd service files.
+fn run_foreground() -> Result<()> {
+    let daemon_dir = daemon_dir()?;
+    std::fs::create_dir_all(&daemon_dir)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    std::fs::create_dir_all(daemon_dir.join("tls"))?;
+    std::fs::write(daemon_dir.join("vexd.pid"), std::process::id().to_string())
+        .context("writing PID file")?;
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;
+
+    tokio::runtime::Runtime::new()?.block_on(run_daemon(vex_home()))
+}
+
+fn do_stop() -> Result<()> {
+    let pid_path = pid_file()?;
+    let Some(pid) = read_pid() else {
+        println!("vexd not running");
+        return Ok(());
+    };
+
+    if !pid_is_alive(pid) {
+        println!("vexd not running (stale pid file)");
+        let _ = std::fs::remove_file(&pid_path);
+        return Ok(());
+    }
+
+    // Send SIGTERM
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+
+    // Wait up to 5 seconds
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !pid_is_alive(pid) {
+            let _ = std::fs::remove_file(&pid_path);
+            println!("vexd stopped");
+            return Ok(());
+        }
+    }
+
+    // Still alive — send SIGKILL
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let _ = std::fs::remove_file(&pid_path);
+    println!("vexd killed");
+    Ok(())
+}
+
+fn do_status() -> Result<()> {
+    let Some(pid) = read_pid() else {
+        println!("vexd not running");
+        return Ok(());
+    };
+
+    if !pid_is_alive(pid) {
+        println!("vexd dead (stale pid file)");
+        return Ok(());
+    }
+
+    // Process is alive — try to get details from the socket
+    let sock = admin_socket_path()?;
+    match tokio::runtime::Runtime::new()?
+        .block_on(local::send_command(&sock, &vex_proto::Command::Status))
+    {
+        Ok(vex_proto::Response::DaemonStatus(s)) => {
+            println!(
+                "vexd running (pid {pid}) | uptime {}s | {} clients",
+                s.uptime_secs, s.connected_clients
+            );
+        }
+        _ => {
+            // Socket not ready yet (starting up), but process is alive
+            println!("vexd running (pid {pid}) | starting up...");
+        }
+    }
+    Ok(())
 }
 
 // ── Daemon server loop ──────────────────────────────────────────────────────
@@ -334,6 +448,10 @@ async fn run_daemon(vex_home: PathBuf) -> Result<()> {
 
     let daemon_dir = vex_home.join("daemon");
     std::fs::create_dir_all(&daemon_dir)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
 
     let user_config = UserConfig::load(&vex_home);
     let token_store = auth::TokenStore::load(daemon_dir.join("tokens.json"))?;
@@ -427,41 +545,159 @@ async fn list_tmux_sessions() -> HashSet<String> {
         .collect()
 }
 
-// ── Stop helper ─────────────────────────────────────────────────────────────
+// ── svc subcommand ────────────────────────────────────────────────────────────
 
-fn do_stop() -> Result<()> {
-    let pid_file = daemon_dir()?.join("vexd.pid");
-    if !pid_file.exists() {
-        println!("vexd does not appear to be running (no PID file).");
-        return Ok(());
+fn cmd_svc(action: &SvcCmd) -> Result<()> {
+    match action {
+        SvcCmd::Enable => svc_enable(),
+        SvcCmd::Disable => svc_disable(),
+        SvcCmd::Status => svc_status(),
     }
-    let pid_str = std::fs::read_to_string(&pid_file)?;
-    let pid = pid_str.trim().to_string();
+}
 
-    let status = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(&pid)
-        .status()
-        .context("failed to run kill")?;
-
-    // Remove PID file regardless; if kill succeeded, process is gone
-    if let Err(e) = std::fs::remove_file(&pid_file) {
-        tracing::warn!("Could not remove PID file: {e}");
-    }
-
-    if status.success() {
-        println!("Sent SIGTERM to vexd (PID {pid}).");
-    } else {
-        eprintln!("kill returned non-zero for PID {pid}; process may already be gone.");
-    }
+#[cfg(target_os = "linux")]
+fn svc_enable() -> Result<()> {
+    let exe = std::env::current_exe().context("cannot determine vexd binary path")?;
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    let service_dir = home.join(".config/systemd/user");
+    std::fs::create_dir_all(&service_dir)?;
+    let service_path = service_dir.join("vexd.service");
+    let unit = format!(
+        "[Unit]\n\
+         Description=Vex Daemon\n\
+         After=network.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={exe} start-foreground\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         Environment=VEX_HOME=%h/.vex\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        exe = exe.display()
+    );
+    std::fs::write(&service_path, unit)?;
+    std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()?;
+    std::process::Command::new("systemctl")
+        .args(["--user", "enable", "--now", "vexd"])
+        .status()?;
+    println!("vexd service enabled and started");
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn svc_disable() -> Result<()> {
+    std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", "vexd"])
+        .status()?;
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    let _ = std::fs::remove_file(home.join(".config/systemd/user/vexd.service"));
+    std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()?;
+    println!("vexd service disabled");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn svc_status() -> Result<()> {
+    let err = std::os::unix::process::CommandExt::exec(
+        std::process::Command::new("systemctl").args(["--user", "status", "vexd"]),
+    );
+    Err(err.into())
+}
+
+#[cfg(target_os = "macos")]
+fn svc_enable() -> Result<()> {
+    let exe = std::env::current_exe().context("cannot determine vexd binary path")?;
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    let vex_home = home.join(".vex");
+    let agents_dir = home.join("Library/LaunchAgents");
+    std::fs::create_dir_all(&agents_dir)?;
+    let plist_path = agents_dir.join("com.vex.vexd.plist");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vex.vexd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+    <string>start-foreground</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VEX_HOME</key>
+    <string>{vex_home}</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>{log}</string>
+  <key>StandardErrorPath</key>
+  <string>{log}</string>
+</dict>
+</plist>
+"#,
+        exe = exe.display(),
+        vex_home = vex_home.display(),
+        log = vex_home.join("daemon/vexd.log").display(),
+    );
+    std::fs::write(&plist_path, plist)?;
+    std::process::Command::new("launchctl")
+        .arg("load")
+        .arg(&plist_path)
+        .status()?;
+    println!("vexd service enabled and started");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn svc_disable() -> Result<()> {
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    let plist_path = home.join("Library/LaunchAgents/com.vex.vexd.plist");
+    std::process::Command::new("launchctl")
+        .arg("unload")
+        .arg(&plist_path)
+        .status()?;
+    let _ = std::fs::remove_file(&plist_path);
+    println!("vexd service disabled");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn svc_status() -> Result<()> {
+    let err = std::os::unix::process::CommandExt::exec(
+        std::process::Command::new("launchctl").args(["list", "com.vex.vexd"]),
+    );
+    Err(err.into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn svc_enable() -> Result<()> {
+    anyhow::bail!("vexd svc is only supported on Linux and macOS")
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn svc_disable() -> Result<()> {
+    anyhow::bail!("vexd svc is only supported on Linux and macOS")
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn svc_status() -> Result<()> {
+    anyhow::bail!("vexd svc is only supported on Linux and macOS")
 }
 
 // ── Misc helpers ────────────────────────────────────────────────────────────
 
 /// Attempt to detect the default branch for a repo path.
-/// Tries `git symbolic-ref refs/remotes/origin/HEAD`, then falls back to
-/// `git rev-parse --abbrev-ref HEAD`, then "main".
 async fn detect_default_branch(repo_path: &str) -> String {
     // Try origin/HEAD symbolic ref first
     if let Ok(out) = tokio::process::Command::new("git")
@@ -475,7 +711,6 @@ async fn detect_default_branch(repo_path: &str) -> String {
         && out.status.success()
     {
         let s = String::from_utf8_lossy(&out.stdout);
-        // e.g. "origin/main" → "main"
         if let Some(branch) = s.trim().strip_prefix("origin/") {
             return branch.to_string();
         }

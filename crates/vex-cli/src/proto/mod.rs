@@ -35,7 +35,34 @@ pub struct Workstream {
     pub tmux_session: String,
     pub status: WorkstreamStatus,
     pub agents: Vec<Agent>,
+    /// Active and recent shell sessions in this workstream
+    #[serde(default)]
+    pub shells: Vec<ShellSession>,
     pub created_at: u64,
+}
+
+// ── Shell session ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSession {
+    pub id: String,
+    pub workstream_id: String,
+    /// tmux window index that hosts this shell
+    pub tmux_window: u32,
+    pub status: ShellStatus,
+    pub started_at: u64,
+    pub exited_at: Option<u64>,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ShellStatus {
+    /// Shell is running and accepting PTY I/O
+    Active,
+    /// Shell is running but no client is currently attached
+    Detached,
+    /// Shell process has exited
+    Exited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -138,6 +165,48 @@ pub enum Command {
     AgentList {
         workstream_id: String,
     },
+
+    // ── Shells ────────────────────────────────────────────────────────────────
+    /// Spawn a new shell window in a workstream (creates a new tmux window).
+    ShellSpawn {
+        workstream_id: String,
+    },
+    /// Kill a shell session.
+    ShellKill {
+        shell_id: String,
+    },
+    /// List shell sessions for a workstream.
+    ShellList {
+        workstream_id: String,
+    },
+    /// Sent by `vex shell` to register itself with vexd after launching.
+    ShellRegister {
+        workstream_id: String,
+        tmux_window: u32,
+    },
+    /// Attach to a shell session's PTY stream.
+    /// After the response `ShellAttached`, the connection switches to PTY
+    /// streaming mode: vexd emits `PtyOutput` frames; client sends
+    /// `PtyInput` / `PtyResize` frames.
+    AttachShell {
+        shell_id: String,
+    },
+    /// Detach the current client from a shell session.
+    DetachShell {
+        shell_id: String,
+    },
+    /// Send keyboard input to a shell's PTY (base64-encoded bytes).
+    PtyInput {
+        shell_id: String,
+        /// base64-encoded bytes to write to the PTY master
+        data: String,
+    },
+    /// Resize a shell's PTY.
+    PtyResize {
+        shell_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +247,50 @@ pub enum Response {
     },
     AgentKilled,
     AgentList(Vec<Agent>),
+
+    // ── Shells ────────────────────────────────────────────────────────────────
+    ShellSpawned(ShellSession),
+    ShellKilled,
+    ShellList(Vec<ShellSession>),
+    /// Sent back to `vex shell` after `ShellRegister`; carries the assigned ID.
+    ShellRegistered {
+        shell_id: String,
+    },
+    /// Sent back after `AttachShell`; followed by streaming `PtyOutput` frames.
+    ShellAttached,
+    ShellDetached,
+    /// PTY output from the shell (base64-encoded bytes).
+    PtyOutput {
+        shell_id: String,
+        /// base64-encoded raw terminal bytes
+        data: String,
+    },
+    /// Emitted by vexd when a shell process exits.
+    ShellExited {
+        shell_id: String,
+        code: Option<i32>,
+    },
+}
+
+// ── PTY streaming ─────────────────────────────────────────────────────────────
+
+/// Bidirectional PTY streaming message.
+///
+/// Used on two channels:
+/// 1. `vex shell` ↔ vexd: supervisor sends `Out`/`Exited`; vexd sends `In`/`Resize`.
+/// 2. `vex attach` remote client ↔ vexd: vexd sends `Out`/`Exited`; client sends
+///    `In`/`Resize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ShellMsg {
+    /// PTY output bytes (base64-encoded) from shell → vexd → attached clients.
+    Out { data: String },
+    /// PTY input bytes (base64-encoded) from attached client → vexd → shell.
+    In { data: String },
+    /// Terminal resize.
+    Resize { cols: u16, rows: u16 },
+    /// Shell process exited.
+    Exited { code: Option<i32> },
 }
 
 // ── Existing helper types ─────────────────────────────────────────────────────
@@ -292,6 +405,9 @@ pub mod framing {
         Ok(())
     }
 
+    /// Maximum allowed frame size (16 MiB). Prevents OOM from malicious length prefixes.
+    const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
+
     /// Read a length-prefixed JSON frame from `r`.
     pub async fn recv<R, T>(r: &mut R) -> Result<T, VexFrameError>
     where
@@ -299,8 +415,118 @@ pub mod framing {
         T: for<'de> Deserialize<'de>,
     {
         let len = r.read_u32().await?;
+        if len > MAX_FRAME_SIZE {
+            return Err(VexFrameError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame too large: {len} bytes (max {MAX_FRAME_SIZE})"),
+            )));
+        }
         let mut buf = vec![0u8; len as usize];
         r.read_exact(&mut buf).await?;
         Ok(serde_json::from_slice(&buf)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, Response, ShellMsg, VexProtoError, framing};
+
+    #[tokio::test]
+    async fn framing_command_roundtrip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(&mut a, &Command::Status).await.unwrap();
+        let recv: Command = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(recv, Command::Status));
+    }
+
+    #[tokio::test]
+    async fn framing_shell_register_roundtrip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let cmd = Command::ShellRegister {
+            workstream_id: "ws_abc123".to_string(),
+            tmux_window: 7,
+        };
+        framing::send(&mut a, &cmd).await.unwrap();
+        let recv: Command = framing::recv(&mut b).await.unwrap();
+        match recv {
+            Command::ShellRegister {
+                workstream_id,
+                tmux_window,
+            } => {
+                assert_eq!(workstream_id, "ws_abc123");
+                assert_eq!(tmux_window, 7);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_shell_msg_out() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let msg = ShellMsg::Out {
+            data: "aGVsbG8=".to_string(),
+        };
+        framing::send(&mut a, &msg).await.unwrap();
+        let recv: ShellMsg = framing::recv(&mut b).await.unwrap();
+        match recv {
+            ShellMsg::Out { data } => assert_eq!(data, "aGVsbG8="),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_shell_msg_resize() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(
+            &mut a,
+            &ShellMsg::Resize {
+                cols: 120,
+                rows: 40,
+            },
+        )
+        .await
+        .unwrap();
+        let recv: ShellMsg = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(
+            recv,
+            ShellMsg::Resize {
+                cols: 120,
+                rows: 40
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn framing_shell_msg_exited() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(&mut a, &ShellMsg::Exited { code: Some(1) })
+            .await
+            .unwrap();
+        let recv: ShellMsg = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(recv, ShellMsg::Exited { code: Some(1) }));
+    }
+
+    #[tokio::test]
+    async fn framing_response_registered() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let resp = Response::ShellRegistered {
+            shell_id: "sh_aabbcc".to_string(),
+        };
+        framing::send(&mut a, &resp).await.unwrap();
+        let recv: Response = framing::recv(&mut b).await.unwrap();
+        match recv {
+            Response::ShellRegistered { shell_id } => assert_eq!(shell_id, "sh_aabbcc"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_response_error() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        framing::send(&mut a, &Response::Error(VexProtoError::NotFound))
+            .await
+            .unwrap();
+        let recv: Response = framing::recv(&mut b).await.unwrap();
+        assert!(matches!(recv, Response::Error(VexProtoError::NotFound)));
     }
 }
