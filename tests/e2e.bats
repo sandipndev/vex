@@ -325,7 +325,7 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     make_git_repo "$repo_dir" main
 
     vex connect
-    vexd_input "release" repo register "$repo_dir"
+    vexd repo register --branch release "$repo_dir"
 
     run vex repo list
     [ "$status" -eq 0 ]
@@ -371,8 +371,8 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     git -C "$repo_dir" checkout -b _parked >/dev/null 2>&1
 
     vex connect
-    # Accept auto-detected branch "develop" as default
-    vexd_input "develop" repo register "$repo_dir"
+    # Explicitly set "develop" as the default branch at registration time
+    vexd repo register --branch develop "$repo_dir"
 
     local repo_id
     repo_id=$(vex repo list | awk 'NR==2 {print $1}')

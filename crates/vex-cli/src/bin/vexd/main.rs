@@ -100,6 +100,9 @@ enum RepoCmd {
     Register {
         /// Path to the repository (can be relative; `.` works)
         path: PathBuf,
+        /// Override the auto-detected default branch
+        #[arg(long, short = 'b')]
+        branch: Option<String>,
     },
 }
 
@@ -257,7 +260,7 @@ fn main() -> Result<()> {
         Commands::Repo { action } => tokio::runtime::Runtime::new()?.block_on(async {
             let sock = admin_socket_path()?;
             match action {
-                RepoCmd::Register { path } => {
+                RepoCmd::Register { path, branch } => {
                     let abs = path
                         .canonicalize()
                         .with_context(|| format!("cannot resolve '{}'", path.display()))?;
@@ -275,9 +278,29 @@ fn main() -> Result<()> {
                         other => anyhow::bail!("Unexpected: {other:?}"),
                     };
 
+                    // If an explicit branch was given, override the auto-detected default
+                    let default_branch = if let Some(b) = branch {
+                        match local::send_command(
+                            &sock,
+                            &vex_proto::Command::RepoSetDefaultBranch {
+                                repo_id: repo.id.clone(),
+                                branch: b.clone(),
+                            },
+                        )
+                        .await?
+                        {
+                            vex_proto::Response::RepoDefaultBranchSet => {}
+                            vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                            other => anyhow::bail!("Unexpected: {other:?}"),
+                        }
+                        b.clone()
+                    } else {
+                        repo.default_branch
+                    };
+
                     println!(
                         "Registered {} ({}) [default branch: {}]",
-                        repo.id, repo.name, repo.default_branch
+                        repo.id, repo.name, default_branch
                     );
                 }
             }

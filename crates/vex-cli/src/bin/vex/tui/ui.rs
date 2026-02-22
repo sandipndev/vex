@@ -22,6 +22,7 @@ pub fn render(f: &mut Frame, app: &App) {
         | Mode::CreateSelectRepo { .. }
         | Mode::CreateNameInput { .. }
         | Mode::CreateBranchInput { .. }
+        | Mode::CreateFromRefInput { .. }
         | Mode::CreateConfirmFetch { .. } => 3,
         _ => 1,
     };
@@ -297,6 +298,20 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         } => {
             let prompt = format!(
                 "Branch [{repo_name}] (default: {default_branch}): {}_",
+                app.create_input
+            );
+            let lines = vec![
+                Line::from(Span::styled(prompt, Style::default())),
+                Line::from(Span::styled(
+                    "enter to confirm   esc to go back",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            Paragraph::new(lines)
+        }
+        Mode::CreateFromRefInput { .. } => {
+            let prompt = format!(
+                "Start from (optional — tag/commit/branch): {}_",
                 app.create_input
             );
             let lines = vec![
