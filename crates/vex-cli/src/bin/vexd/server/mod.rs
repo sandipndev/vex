@@ -402,132 +402,23 @@ async fn handle_workstream_create(
     // 1. from_ref is Some: create new local branch <branch> from the given ref
     // 2. DWIM: resolve local → remote → auto-fetch → error with branch list
     let worktree_out = if let Some(ref r) = from_ref {
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .arg("worktree")
-            .arg("add")
-            .arg(&worktree_path)
-            .arg("-b")
-            .arg(&branch)
-            .arg(r)
-            .output()
-            .await
+        worktree_add_new_branch(&repo_path, &worktree_path, &branch, r).await
     } else {
-        // Step 1: optional explicit fetch
-        if fetch_latest {
-            let fetch_out = tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .arg("fetch")
-                .arg("origin")
-                .output()
-                .await;
-            match fetch_out {
-                Err(e) => return err(format!("failed to run git fetch: {e}")),
-                Ok(o) if !o.status.success() => {
-                    return err(format!(
-                        "failed to fetch origin: {}",
-                        String::from_utf8_lossy(&o.stderr).trim()
-                    ));
-                }
-                Ok(_) => {}
-            }
+        if fetch_latest && let Err(e) = git_fetch_origin(&repo_path).await {
+            return err(e);
         }
 
-        // Step 2: check local branch
-        let local_exists = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .arg("branch")
-            .arg("--list")
-            .arg(&branch)
-            .output()
-            .await
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(false);
-
-        // Step 3: check remote branch
-        let remote_exists = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .arg("rev-parse")
-            .arg("--verify")
-            .arg(format!("origin/{branch}"))
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if local_exists {
-            // Check out existing local branch directly
-            tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .arg("worktree")
-                .arg("add")
-                .arg(&worktree_path)
-                .arg(&branch)
-                .output()
-                .await
-        } else if remote_exists {
-            // Create local tracking branch from remote
-            tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .arg("worktree")
-                .arg("add")
-                .arg(&worktree_path)
-                .arg("--track")
-                .arg("-b")
-                .arg(&branch)
-                .arg(format!("origin/{branch}"))
-                .output()
-                .await
+        if local_branch_exists(&repo_path, &branch).await {
+            worktree_add_branch(&repo_path, &worktree_path, &branch).await
+        } else if remote_branch_exists(&repo_path, &branch).await {
+            worktree_add_tracking(&repo_path, &worktree_path, &branch).await
         } else {
-            // Step 4: auto-fetch and retry
-            let _ = tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .arg("fetch")
-                .arg("origin")
-                .output()
-                .await;
-
-            let remote_now = tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .arg("rev-parse")
-                .arg("--verify")
-                .arg(format!("origin/{branch}"))
-                .output()
-                .await
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-
-            if remote_now {
-                tokio::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo_path)
-                    .arg("worktree")
-                    .arg("add")
-                    .arg(&worktree_path)
-                    .arg("--track")
-                    .arg("-b")
-                    .arg(&branch)
-                    .arg(format!("origin/{branch}"))
-                    .output()
-                    .await
+            // Auto-fetch and retry
+            let _ = git_fetch_origin(&repo_path).await;
+            if remote_branch_exists(&repo_path, &branch).await {
+                worktree_add_tracking(&repo_path, &worktree_path, &branch).await
             } else {
-                let list = tokio::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo_path)
-                    .arg("branch")
-                    .arg("-a")
-                    .output()
-                    .await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default();
+                let list = list_all_branches(&repo_path).await;
                 return err(format!(
                     "branch '{branch}' not found locally or on origin.\nAvailable branches:\n{list}"
                 ));
@@ -1362,6 +1253,127 @@ async fn remove_worktree(repo_path: &str, worktree_path: &std::path::Path) -> an
         .output()
         .await?;
     Ok(())
+}
+
+// ── Git helpers for worktree creation ─────────────────────────────────────────
+
+/// Check whether a local branch exists: `git branch --list <branch>`
+async fn local_branch_exists(repo_path: &str, branch: &str) -> bool {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("branch")
+        .arg("--list")
+        .arg(branch)
+        .output()
+        .await
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Check whether a remote tracking branch exists: `git rev-parse --verify origin/<branch>`
+async fn remote_branch_exists(repo_path: &str, branch: &str) -> bool {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(format!("origin/{branch}"))
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// `git fetch origin` — returns an error string on failure, Ok(()) on success.
+async fn git_fetch_origin(repo_path: &str) -> Result<(), String> {
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("fetch")
+        .arg("origin")
+        .output()
+        .await;
+    match out {
+        Err(e) => Err(format!("failed to run git fetch: {e}")),
+        Ok(o) if !o.status.success() => Err(format!(
+            "failed to fetch origin: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// `git worktree add <path> <branch>` — check out an existing local branch.
+async fn worktree_add_branch(
+    repo_path: &str,
+    worktree_path: &std::path::Path,
+    branch: &str,
+) -> std::io::Result<std::process::Output> {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("worktree")
+        .arg("add")
+        .arg(worktree_path)
+        .arg(branch)
+        .output()
+        .await
+}
+
+/// `git worktree add <path> --track -b <branch> origin/<branch>`
+/// — create a new local tracking branch from origin.
+async fn worktree_add_tracking(
+    repo_path: &str,
+    worktree_path: &std::path::Path,
+    branch: &str,
+) -> std::io::Result<std::process::Output> {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("worktree")
+        .arg("add")
+        .arg(worktree_path)
+        .arg("--track")
+        .arg("-b")
+        .arg(branch)
+        .arg(format!("origin/{branch}"))
+        .output()
+        .await
+}
+
+/// `git worktree add <path> -b <branch> <start_point>`
+/// — create a new local branch from an explicit ref.
+async fn worktree_add_new_branch(
+    repo_path: &str,
+    worktree_path: &std::path::Path,
+    branch: &str,
+    start_point: &str,
+) -> std::io::Result<std::process::Output> {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("worktree")
+        .arg("add")
+        .arg(worktree_path)
+        .arg("-b")
+        .arg(branch)
+        .arg(start_point)
+        .output()
+        .await
+}
+
+/// List all branches (`git branch -a`) as a display string.
+async fn list_all_branches(repo_path: &str) -> String {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("branch")
+        .arg("-a")
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
