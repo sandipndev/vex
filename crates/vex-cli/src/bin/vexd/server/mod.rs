@@ -145,12 +145,30 @@ async fn dispatch(
             }
         }
 
+        Command::RepoSetDefaultBranch { repo_id, branch } => {
+            if matches!(transport, Transport::Tcp) {
+                return Response::Error(VexProtoError::LocalOnly);
+            }
+            let mut store = state.repo_store.lock().await;
+            match store.repos.iter_mut().find(|r| r.id == repo_id) {
+                None => Response::Error(VexProtoError::NotFound),
+                Some(repo) => {
+                    repo.default_branch = branch;
+                    if let Err(e) = store.save() {
+                        tracing::error!("persist error: {e}");
+                    }
+                    Response::RepoDefaultBranchSet
+                }
+            }
+        }
+
         // ── Workstreams ────────────────────────────────────────────────────────
         Command::WorkstreamCreate {
             repo_id,
             name,
             branch,
-        } => handle_workstream_create(state, repo_id, name, branch).await,
+            fetch_latest,
+        } => handle_workstream_create(state, repo_id, name, branch, fetch_latest).await,
 
         Command::WorkstreamList { repo_id } => {
             let store = state.repo_store.lock().await;
@@ -227,6 +245,7 @@ async fn handle_repo_register(state: &Arc<AppState>, path: String) -> Response {
         id: id.clone(),
         name: name.clone(),
         path: path.clone(),
+        default_branch: "main".to_string(),
         registered_at: unix_ts(),
         workstreams: Vec::new(),
     };
@@ -247,24 +266,71 @@ async fn handle_repo_register(state: &Arc<AppState>, path: String) -> Response {
 async fn handle_workstream_create(
     state: &Arc<AppState>,
     repo_id: String,
-    name: String,
-    branch: String,
+    name: Option<String>,
+    branch: Option<String>,
+    fetch_latest: bool,
 ) -> Response {
-    // Extract repo path under lock, then release
-    let repo_path = {
+    // Resolve branch/name and extract repo path under lock, then release
+    let (repo_path, branch, name) = {
         let store = state.repo_store.lock().await;
         match store.find_by_id(&repo_id) {
             None => return Response::Error(VexProtoError::NotFound),
             Some(repo) => {
-                if repo.workstreams.iter().any(|w| w.name == name) {
-                    return err(format!("workstream '{name}' already exists in this repo"));
+                let resolved_branch = branch.unwrap_or_else(|| repo.default_branch.clone());
+                let resolved_name = name.unwrap_or_else(|| resolved_branch.clone());
+                if repo.workstreams.iter().any(|w| w.name == resolved_name) {
+                    return err(format!(
+                        "workstream '{resolved_name}' already exists in this repo"
+                    ));
                 }
-                repo.path.clone()
+                (repo.path.clone(), resolved_branch, resolved_name)
             }
         }
     };
 
-    // Validate branch
+    // Optionally fetch from origin and fast-forward the local branch
+    if fetch_latest {
+        let fetch_out = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("fetch")
+            .arg("origin")
+            .arg(&branch)
+            .output()
+            .await;
+        match fetch_out {
+            Err(e) => return err(format!("failed to run git fetch: {e}")),
+            Ok(o) if !o.status.success() => {
+                return err(format!(
+                    "failed to fetch origin/{branch}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+            }
+            Ok(_) => {}
+        }
+
+        let ff_out = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("branch")
+            .arg("-f")
+            .arg(&branch)
+            .arg(format!("origin/{branch}"))
+            .output()
+            .await;
+        match ff_out {
+            Err(e) => return err(format!("failed to run git branch -f: {e}")),
+            Ok(o) if !o.status.success() => {
+                return err(format!(
+                    "failed to fast-forward {branch} to origin/{branch}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+            }
+            Ok(_) => {}
+        }
+    }
+
+    // Validate branch exists locally
     match tokio::process::Command::new("git")
         .arg("-C")
         .arg(&repo_path)

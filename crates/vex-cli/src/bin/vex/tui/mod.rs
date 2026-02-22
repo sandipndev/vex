@@ -365,8 +365,9 @@ async fn create_workstream(
 ) -> Result<vex_cli::Workstream> {
     conn.send(&Command::WorkstreamCreate {
         repo_id,
-        name: branch.clone(),
-        branch,
+        name: None,
+        branch: Some(branch),
+        fetch_latest: false,
     })
     .await?;
     let resp: Response = conn.recv().await?;

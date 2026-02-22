@@ -5,12 +5,20 @@ pub const DEFAULT_TCP_PORT: u16 = 7422;
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
+fn default_branch_fallback() -> String {
+    "main".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
     pub id: String,
     pub name: String,
     /// Absolute path to the git repository on disk
     pub path: String,
+    /// Default branch used when creating a workstream without an explicit branch.
+    /// Falls back to "main" for repos persisted before this field was added.
+    #[serde(default = "default_branch_fallback")]
+    pub default_branch: String,
     pub registered_at: u64,
     pub workstreams: Vec<Workstream>,
 }
@@ -85,12 +93,22 @@ pub enum Command {
     RepoUnregister {
         repo_id: String,
     },
+    /// Update the default branch stored for a repo. Unix-socket only.
+    RepoSetDefaultBranch {
+        repo_id: String,
+        branch: String,
+    },
 
     // ── Workstreams ───────────────────────────────────────────────────────────
     WorkstreamCreate {
         repo_id: String,
-        name: String,
-        branch: String,
+        /// Workstream name. `None` = use the resolved branch name.
+        name: Option<String>,
+        /// Branch to check out. `None` = use the repo's `default_branch`.
+        branch: Option<String>,
+        /// If true, fetch `origin/<branch>` and fast-forward the local branch
+        /// before creating the worktree.
+        fetch_latest: bool,
     },
     /// `repo_id = None` means all repos
     WorkstreamList {
@@ -142,6 +160,7 @@ pub enum Response {
     RepoRegistered(Repository),
     RepoList(Vec<Repository>),
     RepoUnregistered,
+    RepoDefaultBranchSet,
 
     // ── Workstreams ───────────────────────────────────────────────────────────
     WorkstreamCreated(Workstream),
