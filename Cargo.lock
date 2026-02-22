@@ -1486,6 +1486,7 @@ dependencies = [
  "crossterm",
  "daemonize",
  "dirs",
+ "libc",
  "qrcode",
  "rand",
  "ratatui",
