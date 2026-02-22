@@ -30,22 +30,12 @@ pub fn ensure_tls_certs(
         Ok((certs, key))
     } else {
         std::fs::create_dir_all(tls_dir)?;
-        // Restrict the TLS directory so other local users can't read the key
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(tls_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
         let rcgen::CertifiedKey { cert, key_pair } =
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
         let cert_pem = cert.pem();
         let key_pem = key_pair.serialize_pem();
         std::fs::write(&cert_path, &cert_pem)?;
         std::fs::write(&key_path, &key_pem)?;
-        // Restrict key file to owner-only (private key must not be world-readable)
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-        }
 
         let certs =
             rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
@@ -78,24 +68,15 @@ pub async fn serve_tcp(
         tokio::spawn(async move {
             match acceptor.accept(stream).await {
                 Ok(mut tls_stream) => {
-                    // Pre-command auth — enforce a timeout so a slow/stalled
-                    // client cannot hold a connection open indefinitely.
-                    let auth: vex_proto::AuthToken = match tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        vex_proto::framing::recv(&mut tls_stream),
-                    )
-                    .await
-                    {
-                        Ok(Ok(a)) => a,
-                        Ok(Err(e)) => {
-                            tracing::warn!("Auth read error from {peer_addr}: {e}");
-                            return;
-                        }
-                        Err(_) => {
-                            tracing::warn!("Auth timeout from {peer_addr}");
-                            return;
-                        }
-                    };
+                    // Pre-command auth
+                    let auth: vex_proto::AuthToken =
+                        match vex_proto::framing::recv(&mut tls_stream).await {
+                            Ok(a) => a,
+                            Err(e) => {
+                                tracing::warn!("Auth read error from {peer_addr}: {e}");
+                                return;
+                            }
+                        };
 
                     // Log fingerprint of the connecting cert (none for mutual TLS, but we log peer)
                     let token_id = {
