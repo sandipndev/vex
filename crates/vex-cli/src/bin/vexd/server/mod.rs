@@ -1226,6 +1226,19 @@ fn build_send_keys_cmd(cmd_parts: &[&str], prompt: &str) -> String {
     format!("{} '{escaped}'", cmd_parts.join(" "))
 }
 
+async fn remove_worktree(repo_path: &str, worktree_path: &std::path::Path) -> anyhow::Result<()> {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("worktree")
+        .arg("remove")
+        .arg("--force")
+        .arg(worktree_path)
+        .output()
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RING_MAX, build_send_keys_cmd, ring_append};
@@ -1297,17 +1310,4 @@ mod tests {
         ring_append(&mut buf, &vec![b'x'; RING_MAX]);
         assert_eq!(buf.len(), RING_MAX);
     }
-}
-
-async fn remove_worktree(repo_path: &str, worktree_path: &std::path::Path) -> anyhow::Result<()> {
-    tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .arg("worktree")
-        .arg("remove")
-        .arg("--force")
-        .arg(worktree_path)
-        .output()
-        .await?;
-    Ok(())
 }

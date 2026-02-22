@@ -172,6 +172,17 @@ impl RepoStore {
     }
 }
 
+/// Check whether a worktree path still exists; just logs a warning if missing.
+pub fn warn_missing_worktrees(repos: &[Repository]) {
+    for repo in repos {
+        for ws in &repo.workstreams {
+            if !Path::new(&ws.worktree_path).exists() {
+                tracing::warn!("Worktree missing for {}: {}", ws.id, ws.worktree_path);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RepoStore, gen_id, next_agent_id};
@@ -235,7 +246,7 @@ mod tests {
     fn next_agent_id_sequential() {
         assert_eq!(next_agent_id(&[]), "agent_001");
         let a1 = make_agent("agent_001", "ws_x");
-        assert_eq!(next_agent_id(&[a1.clone()]), "agent_002");
+        assert_eq!(next_agent_id(std::slice::from_ref(&a1)), "agent_002");
         let a2 = make_agent("agent_002", "ws_x");
         assert_eq!(next_agent_id(&[a1, a2]), "agent_003");
     }
@@ -355,16 +366,5 @@ mod tests {
             store.repos[0].workstreams[0].status,
             WorkstreamStatus::Running
         );
-    }
-}
-
-/// Check whether a worktree path still exists; just logs a warning if missing.
-pub fn warn_missing_worktrees(repos: &[Repository]) {
-    for repo in repos {
-        for ws in &repo.workstreams {
-            if !Path::new(&ws.worktree_path).exists() {
-                tracing::warn!("Worktree missing for {}: {}", ws.id, ws.worktree_path);
-            }
-        }
     }
 }
