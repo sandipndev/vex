@@ -33,12 +33,22 @@ pub enum Mode {
         name: String,
         default_branch: String,
     },
-    /// Step 3: confirm whether to fetch from origin
+    /// Step 3: optional start-point (tag, commit, or branch) for `git worktree add -b`
+    CreateFromRefInput {
+        repo_id: String,
+        repo_name: String,
+        name: String,
+        /// The branch typed in step 2 (None = use repo default)
+        branch: Option<String>,
+    },
+    /// Step 4: confirm whether to fetch from origin
     CreateConfirmFetch {
         repo_id: String,
         name: String,
         /// None means use the repo's default branch
         branch: Option<String>,
+        /// Explicit start point: tag, commit, or branch to create `branch` from
+        from_ref: Option<String>,
     },
 }
 

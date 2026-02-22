@@ -334,10 +334,63 @@ async fn handle_key(
                         Some(branch_raw)
                     };
                     app.create_input.clear();
+                    app.mode = Mode::CreateFromRefInput {
+                        repo_id,
+                        repo_name,
+                        name,
+                        branch,
+                    };
+                }
+                KeyCode::Backspace => {
+                    app.create_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.create_input.push(c);
+                }
+                _ => {}
+            }
+        }
+
+        Mode::CreateFromRefInput {
+            repo_id,
+            repo_name,
+            name,
+            branch,
+        } => {
+            let repo_id = repo_id.clone();
+            let repo_name = repo_name.clone();
+            let name = name.clone();
+            let branch = branch.clone();
+            match key {
+                KeyCode::Esc => {
+                    // Go back to branch step
+                    app.create_input = branch.clone().unwrap_or_default();
+                    let db = app
+                        .repos
+                        .iter()
+                        .find(|r| r.id == repo_id)
+                        .map(|r| r.default_branch.clone())
+                        .unwrap_or_default();
+                    app.mode = Mode::CreateBranchInput {
+                        repo_id,
+                        repo_name,
+                        name,
+                        default_branch: db,
+                    };
+                }
+                KeyCode::Enter => {
+                    let from_raw = app.create_input.trim().to_string();
+                    let from_ref = if from_raw.is_empty() {
+                        None
+                    } else {
+                        Some(from_raw)
+                    };
+                    app.create_input.clear();
                     app.mode = Mode::CreateConfirmFetch {
                         repo_id,
                         name,
                         branch,
+                        from_ref,
                     };
                 }
                 KeyCode::Backspace => {
@@ -354,14 +407,17 @@ async fn handle_key(
             repo_id,
             name,
             branch,
+            from_ref,
         } => {
             let repo_id = repo_id.clone();
             let name = name.clone();
             let branch = branch.clone();
+            let from_ref = from_ref.clone();
             match key {
                 KeyCode::Char('y') => {
                     app.mode = Mode::Normal;
-                    match create_workstream(conn, repo_id, Some(name), branch, true).await {
+                    match create_workstream(conn, repo_id, Some(name), branch, from_ref, true).await
+                    {
                         Ok(ws) => {
                             app.status_msg =
                                 Some(format!("Created workstream '{}' (fetched)", ws.name));
@@ -374,7 +430,9 @@ async fn handle_key(
                 }
                 KeyCode::Char('n') | KeyCode::Enter => {
                     app.mode = Mode::Normal;
-                    match create_workstream(conn, repo_id, Some(name), branch, false).await {
+                    match create_workstream(conn, repo_id, Some(name), branch, from_ref, false)
+                        .await
+                    {
                         Ok(ws) => {
                             app.status_msg = Some(format!("Created workstream '{}'", ws.name));
                             refresh_repos(conn, app).await;
@@ -385,20 +443,19 @@ async fn handle_key(
                     }
                 }
                 KeyCode::Esc => {
-                    // Go back to branch step; restore create_input to whatever branch was
-                    app.create_input = branch.unwrap_or_default();
-                    // We lost repo_name and default_branch, get from repos list
-                    let (rname, db) = app
+                    // Go back to from_ref step
+                    app.create_input = from_ref.unwrap_or_default();
+                    let (rname, _) = app
                         .repos
                         .iter()
                         .find(|r| r.id == repo_id)
                         .map(|r| (r.name.clone(), r.default_branch.clone()))
                         .unwrap_or_default();
-                    app.mode = Mode::CreateBranchInput {
+                    app.mode = Mode::CreateFromRefInput {
                         repo_id,
                         repo_name: rname,
                         name,
-                        default_branch: db,
+                        branch,
                     };
                 }
                 _ => {}
@@ -480,12 +537,14 @@ async fn create_workstream(
     repo_id: String,
     name: Option<String>,
     branch: Option<String>,
+    from_ref: Option<String>,
     fetch_latest: bool,
 ) -> Result<vex_cli::Workstream> {
     conn.send(&Command::WorkstreamCreate {
         repo_id,
         name,
         branch,
+        from_ref,
         fetch_latest,
     })
     .await?;

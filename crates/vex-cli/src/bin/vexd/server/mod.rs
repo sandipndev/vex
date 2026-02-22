@@ -205,8 +205,9 @@ async fn dispatch(
             repo_id,
             name,
             branch,
+            from_ref,
             fetch_latest,
-        } => handle_workstream_create(state, repo_id, name, branch, fetch_latest).await,
+        } => handle_workstream_create(state, repo_id, name, branch, from_ref, fetch_latest).await,
 
         Command::WorkstreamList { repo_id } => {
             let store = state.repo_store.lock().await;
@@ -277,6 +278,44 @@ async fn dispatch(
 
 // ── Repo handlers ─────────────────────────────────────────────────────────────
 
+/// Detect the default branch of a git repository.
+/// Order: symbolic-ref refs/remotes/origin/HEAD → rev-parse --abbrev-ref HEAD → "main"
+async fn detect_default_branch(repo_path: &str) -> String {
+    if let Ok(out) = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("symbolic-ref")
+        .arg("refs/remotes/origin/HEAD")
+        .arg("--short")
+        .output()
+        .await
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        if let Some(branch) = s.trim().strip_prefix("origin/") {
+            return branch.to_string();
+        }
+    }
+
+    if let Ok(out) = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .output()
+        .await
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() && s != "HEAD" {
+            return s;
+        }
+    }
+
+    "main".to_string()
+}
+
 async fn handle_repo_register(state: &Arc<AppState>, path: String) -> Response {
     let p = std::path::Path::new(&path);
     if !p.exists() {
@@ -293,6 +332,9 @@ async fn handle_repo_register(state: &Arc<AppState>, path: String) -> Response {
         }
     }
 
+    // Detect default branch while no lock is held
+    let default_branch = detect_default_branch(&path).await;
+
     let name = p
         .file_name()
         .unwrap_or_default()
@@ -308,7 +350,7 @@ async fn handle_repo_register(state: &Arc<AppState>, path: String) -> Response {
         id: id.clone(),
         name: name.clone(),
         path: path.clone(),
-        default_branch: "main".to_string(),
+        default_branch,
         registered_at: unix_ts(),
         workstreams: Vec::new(),
     };
@@ -331,6 +373,7 @@ async fn handle_workstream_create(
     repo_id: String,
     name: Option<String>,
     branch: Option<String>,
+    from_ref: Option<String>,
     fetch_latest: bool,
 ) -> Response {
     // Resolve branch/name and extract repo path under lock, then release
@@ -351,99 +394,160 @@ async fn handle_workstream_create(
         }
     };
 
-    // Optionally fetch from origin
-    if fetch_latest {
-        let fetch_out = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .arg("fetch")
-            .arg("origin")
-            .arg(&branch)
-            .output()
-            .await;
-        match fetch_out {
-            Err(e) => return err(format!("failed to run git fetch: {e}")),
-            Ok(o) if !o.status.success() => {
-                return err(format!(
-                    "failed to fetch origin/{branch}: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                ));
-            }
-            Ok(_) => {}
-        }
-    }
-
-    // Validate branch exists (locally or on origin)
-    let local_exists = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo_path)
-        .arg("branch")
-        .arg("--list")
-        .arg(&branch)
-        .output()
-        .await
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false);
-    let remote_exists = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo_path)
-        .arg("rev-parse")
-        .arg("--verify")
-        .arg(format!("origin/{branch}"))
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !local_exists && !remote_exists {
-        return err(format!(
-            "branch '{branch}' not found locally or on origin in {repo_path}"
-        ));
-    }
-
     let ws_id = gen_id("ws");
     let worktree_path = state.worktrees_dir().join(&ws_id);
     let tmux_session = format!("vex-{ws_id}");
 
-    // Create git worktree on a throwaway branch named after the workstream ID.
-    // Prefer starting from origin/<branch> so the worktree doesn't require the
-    // local branch to be free (i.e. not checked out elsewhere).
-    // Fall back to <branch> for local-only repos without a remote.
-    let worktree_out = if remote_exists {
+    // Create git worktree — two modes:
+    // 1. from_ref is Some: create new local branch <branch> from the given ref
+    // 2. DWIM: resolve local → remote → auto-fetch → error with branch list
+    let worktree_out = if let Some(ref r) = from_ref {
         tokio::process::Command::new("git")
             .arg("-C")
             .arg(&repo_path)
             .arg("worktree")
             .arg("add")
             .arg(&worktree_path)
-            .arg("--no-track")
             .arg("-b")
-            .arg(&ws_id)
-            .arg(format!("origin/{branch}"))
+            .arg(&branch)
+            .arg(r)
             .output()
             .await
     } else {
-        tokio::process::Command::new("git")
+        // Step 1: optional explicit fetch
+        if fetch_latest {
+            let fetch_out = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("fetch")
+                .arg("origin")
+                .output()
+                .await;
+            match fetch_out {
+                Err(e) => return err(format!("failed to run git fetch: {e}")),
+                Ok(o) if !o.status.success() => {
+                    return err(format!(
+                        "failed to fetch origin: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ));
+                }
+                Ok(_) => {}
+            }
+        }
+
+        // Step 2: check local branch
+        let local_exists = tokio::process::Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .arg("worktree")
-            .arg("add")
-            .arg(&worktree_path)
-            .arg("--no-track")
-            .arg("-b")
-            .arg(&ws_id)
+            .arg("branch")
+            .arg("--list")
             .arg(&branch)
             .output()
             .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+
+        // Step 3: check remote branch
+        let remote_exists = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg(format!("origin/{branch}"))
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if local_exists {
+            // Check out existing local branch directly
+            tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("worktree")
+                .arg("add")
+                .arg(&worktree_path)
+                .arg(&branch)
+                .output()
+                .await
+        } else if remote_exists {
+            // Create local tracking branch from remote
+            tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("worktree")
+                .arg("add")
+                .arg(&worktree_path)
+                .arg("--track")
+                .arg("-b")
+                .arg(&branch)
+                .arg(format!("origin/{branch}"))
+                .output()
+                .await
+        } else {
+            // Step 4: auto-fetch and retry
+            let _ = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("fetch")
+                .arg("origin")
+                .output()
+                .await;
+
+            let remote_now = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("rev-parse")
+                .arg("--verify")
+                .arg(format!("origin/{branch}"))
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if remote_now {
+                tokio::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .arg("worktree")
+                    .arg("add")
+                    .arg(&worktree_path)
+                    .arg("--track")
+                    .arg("-b")
+                    .arg(&branch)
+                    .arg(format!("origin/{branch}"))
+                    .output()
+                    .await
+            } else {
+                let list = tokio::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .arg("branch")
+                    .arg("-a")
+                    .output()
+                    .await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                return err(format!(
+                    "branch '{branch}' not found locally or on origin.\nAvailable branches:\n{list}"
+                ));
+            }
+        }
     };
+
     let out = match worktree_out {
         Err(e) => return err(format!("git worktree add failed: {e}")),
         Ok(o) => o,
     };
     if !out.status.success() {
-        return err(format!(
-            "git worktree add failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let mut msg = format!("git worktree add failed: {}", stderr.trim());
+        if stderr.contains("already checked out") {
+            msg.push_str(
+                "\nHint: use --from <branch> --branch <new-name> to create a new branch from it.",
+            );
+        }
+        return err(msg);
     }
 
     // Run config hooks
