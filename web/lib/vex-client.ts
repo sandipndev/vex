@@ -1,8 +1,8 @@
-import * as net from "node:net";
 import * as tls from "node:tls";
 import type { AuthToken, Command, Response } from "./types";
 
 const DEFAULT_PORT = 7422;
+const TIMEOUT_MS = 10_000;
 
 function parseHostPort(host: string): { hostname: string; port: number } {
   const lastColon = host.lastIndexOf(":");
@@ -24,53 +24,89 @@ function encodeFrame(data: unknown): Buffer {
   return Buffer.concat([header, body]);
 }
 
-async function readExact(
+function writeFrame(
   socket: tls.TLSSocket,
-  n: number
-): Promise<Buffer> {
+  data: unknown
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let received = 0;
-
-    const onData = (chunk: Buffer) => {
-      chunks.push(chunk);
-      received += chunk.length;
-      if (received >= n) {
-        socket.removeListener("data", onData);
-        socket.removeListener("error", onError);
-        socket.removeListener("close", onClose);
-        const full = Buffer.concat(chunks);
-        resolve(full.subarray(0, n));
-        // If we read more than n, push back the excess
-        if (full.length > n) {
-          socket.unshift(full.subarray(n));
-        }
-      }
-    };
-
-    const onError = (err: Error) => {
-      socket.removeListener("data", onData);
-      socket.removeListener("close", onClose);
-      reject(err);
-    };
-
-    const onClose = () => {
-      socket.removeListener("data", onData);
-      socket.removeListener("error", onError);
-      reject(new Error("Connection closed while reading"));
-    };
-
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("close", onClose);
+    socket.write(encodeFrame(data), (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
   });
 }
 
-async function recvFrame<T>(socket: tls.TLSSocket): Promise<T> {
-  const header = await readExact(socket, 4);
-  const len = header.readUInt32BE(0);
-  const body = await readExact(socket, len);
-  return JSON.parse(body.toString("utf-8")) as T;
+class FrameReader {
+  private buf = Buffer.alloc(0);
+  private waiting: { resolve: () => void; reject: (e: Error) => void } | null =
+    null;
+
+  constructor(private socket: tls.TLSSocket) {
+    socket.on("data", (chunk: Buffer) => {
+      this.buf = Buffer.concat([this.buf, chunk]);
+      if (this.waiting) {
+        const w = this.waiting;
+        this.waiting = null;
+        w.resolve();
+      }
+    });
+    socket.on("error", (err) => {
+      if (this.waiting) {
+        const w = this.waiting;
+        this.waiting = null;
+        w.reject(err);
+      }
+    });
+    socket.on("close", () => {
+      if (this.waiting) {
+        const w = this.waiting;
+        this.waiting = null;
+        w.reject(new Error("Connection closed while reading"));
+      }
+    });
+  }
+
+  private waitForData(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.waiting = { resolve, reject };
+    });
+  }
+
+  async readFrame<T>(): Promise<T> {
+    // Read 4-byte length header
+    while (this.buf.length < 4) {
+      await this.waitForData();
+    }
+    const len = this.buf.readUInt32BE(0);
+
+    // Read full body
+    while (this.buf.length < 4 + len) {
+      await this.waitForData();
+    }
+
+    const body = this.buf.subarray(4, 4 + len);
+    this.buf = this.buf.subarray(4 + len);
+    return JSON.parse(body.toString("utf-8")) as T;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Operation timed out after ${ms}ms`)),
+      ms
+    );
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
 }
 
 export async function executeVexCommand(
@@ -81,31 +117,36 @@ export async function executeVexCommand(
 ): Promise<Response> {
   const { hostname, port } = parseHostPort(host);
 
-  const socket = await new Promise<tls.TLSSocket>((resolve, reject) => {
-    const sock = tls.connect(
-      {
-        host: hostname,
-        port,
-        rejectUnauthorized: false, // Self-signed certs (TOFU model)
-      },
-      () => resolve(sock)
-    );
-    sock.on("error", reject);
-  });
+  const socket = await withTimeout(
+    new Promise<tls.TLSSocket>((resolve, reject) => {
+      const sock = tls.connect(
+        {
+          host: hostname,
+          port,
+          rejectUnauthorized: false, // Self-signed certs (TOFU model)
+        },
+        () => resolve(sock)
+      );
+      sock.on("error", reject);
+    }),
+    TIMEOUT_MS
+  );
 
   try {
-    // Pause stream for manual reading
-    socket.pause();
+    const reader = new FrameReader(socket);
 
     // Send auth token
     const auth: AuthToken = {
       token_id: tokenId,
       token_secret: tokenSecret,
     };
-    socket.write(encodeFrame(auth));
+    await writeFrame(socket, auth);
 
     // Read auth response
-    const authResponse = await recvFrame<Response>(socket);
+    const authResponse = await withTimeout(
+      reader.readFrame<Response>(),
+      TIMEOUT_MS
+    );
     if (authResponse.type === "Error") {
       const err = authResponse.data;
       const msg =
@@ -119,11 +160,10 @@ export async function executeVexCommand(
     }
 
     // Send command
-    socket.write(encodeFrame(command));
+    await writeFrame(socket, command);
 
     // Read command response
-    const response = await recvFrame<Response>(socket);
-    return response;
+    return await withTimeout(reader.readFrame<Response>(), TIMEOUT_MS);
   } finally {
     socket.destroy();
   }
