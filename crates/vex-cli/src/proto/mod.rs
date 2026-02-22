@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Default port vexd listens on for TLS TCP connections.
 pub const DEFAULT_TCP_PORT: u16 = 7422;
 
+/// Default port vexd listens on for HTTPS (HTTP API) connections.
+pub const DEFAULT_HTTP_PORT: u16 = 7423;
+
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -266,7 +266,17 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
     let tcp_addr: SocketAddr = format!("0.0.0.0:{tcp_port}")
         .parse()
         .context("invalid TCP address")?;
+    let http_port: u16 = std::env::var("VEXD_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(vex_proto::DEFAULT_HTTP_PORT);
+    let http_addr: SocketAddr = format!("0.0.0.0:{http_port}")
+        .parse()
+        .context("invalid HTTP address")?;
     let tls_dir = vexd_dir.join("tls");
+
+    // Ensure TLS certs exist before starting servers that need them
+    server::tcp::ensure_tls_certs(&tls_dir)?;
 
     match server::tcp::cert_fingerprint(&tls_dir) {
         Ok(fp) => tracing::info!("TLS cert fingerprint (blake3): {fp}"),
@@ -274,7 +284,12 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
     }
 
     let unix_handle = tokio::spawn(server::unix::serve_unix(state.clone(), socket_path));
-    let tcp_handle = tokio::spawn(server::tcp::serve_tcp(state.clone(), tcp_addr, tls_dir));
+    let tcp_handle = tokio::spawn(server::tcp::serve_tcp(
+        state.clone(),
+        tcp_addr,
+        tls_dir.clone(),
+    ));
+    let http_handle = tokio::spawn(server::http::serve_http(state.clone(), http_addr, tls_dir));
 
     use tokio::signal::unix::{SignalKind, signal};
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -294,6 +309,13 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
                 Ok(Ok(())) => tracing::info!("TCP server stopped"),
                 Ok(Err(e)) => tracing::error!("TCP server error: {e}"),
                 Err(e) => tracing::error!("TCP server panicked: {e}"),
+            }
+        }
+        res = http_handle => {
+            match res {
+                Ok(Ok(())) => tracing::info!("HTTP server stopped"),
+                Ok(Err(e)) => tracing::error!("HTTP server error: {e}"),
+                Err(e) => tracing::error!("HTTP server panicked: {e}"),
             }
         }
         _ = sigterm.recv() => tracing::info!("SIGTERM received, shutting down"),
