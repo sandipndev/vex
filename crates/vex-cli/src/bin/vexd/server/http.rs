@@ -5,10 +5,10 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use axum::{
     Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     routing::post,
 };
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use vex_proto::{Command, Response, Transport, VexProtoError};
 
 use crate::state::AppState;
@@ -25,7 +25,12 @@ pub async fn serve_http(
 ) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/command", post(handle_command))
-        .layer(CorsLayer::very_permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
+        )
         .with_state(state);
 
     let cert_path = tls_dir.join("cert.pem");
