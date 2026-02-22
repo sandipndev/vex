@@ -66,7 +66,7 @@ jobs:
 
       - name: Install web dependencies
         working-directory: web
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile && pnpm cypress install
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -75,12 +75,16 @@ jobs:
       - name: Build and start vexd container
         run: |
           docker build -t vex-web-test .
-          docker run -d --name vex-web-test -p 9422:7422 vex-web-test
+          docker run -d --name vex-web-test -p 9422:7422 -p 9423:7423 vex-web-test
 
       - name: Wait for vexd
         run: |
           for i in $(seq 1 100); do
-            (echo >/dev/tcp/127.0.0.1/9422) 2>/dev/null && exit 0
+            (echo >/dev/tcp/127.0.0.1/9422) 2>/dev/null && break
+            sleep 0.1
+          done
+          for i in $(seq 1 100); do
+            (echo >/dev/tcp/127.0.0.1/9423) 2>/dev/null && exit 0
             sleep 0.1
           done
           echo "vexd not ready" && exit 1

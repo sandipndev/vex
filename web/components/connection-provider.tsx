@@ -11,13 +11,12 @@ import type {
   Command,
   DaemonStatus,
   Response,
-  VexApiResponse,
 } from "@/lib/types";
+import { DEFAULT_HTTP_PORT } from "@/lib/types";
 
 interface Credentials {
   host: string;
-  token_id: string;
-  token_secret: string;
+  pairing: string;
 }
 
 interface ConnectionState {
@@ -34,6 +33,29 @@ interface ConnectionState {
 const ConnectionContext = createContext<ConnectionState | null>(null);
 
 const STORAGE_KEY = "vex-credentials";
+
+function buildUrl(host: string): string {
+  const lastColon = host.lastIndexOf(":");
+  let hostname: string;
+  let port: number;
+
+  if (lastColon === -1) {
+    hostname = host;
+    port = DEFAULT_HTTP_PORT;
+  } else {
+    const portStr = host.slice(lastColon + 1);
+    const parsed = parseInt(portStr, 10);
+    if (isNaN(parsed)) {
+      hostname = host;
+      port = DEFAULT_HTTP_PORT;
+    } else {
+      hostname = host.slice(0, lastColon);
+      port = parsed;
+    }
+  }
+
+  return `https://${hostname}:${port}/api/command`;
+}
 
 export function ConnectionProvider({
   children,
@@ -66,22 +88,28 @@ export function ConnectionProvider({
         throw new Error("Not connected");
       }
 
-      const res = await fetch("/api/vex", {
+      const url = buildUrl(credentials.host);
+      const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          host: credentials.host,
-          token_id: credentials.token_id,
-          token_secret: credentials.token_secret,
-          command,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${credentials.pairing}`,
+        },
+        body: JSON.stringify({ command }),
       });
 
-      const data: VexApiResponse = await res.json();
-      if (!data.ok || !data.response) {
-        throw new Error(data.error || "Request failed");
+      if (res.status === 401) {
+        throw new Error("Authentication failed");
       }
-      return data.response;
+
+      const data: Response = await res.json();
+      if (data.type === "Error") {
+        const err = data.data;
+        throw new Error(
+          "code" in err && err.code === "Internal" ? err.message : err.code
+        );
+      }
+      return data;
     },
     [credentials]
   );
@@ -91,24 +119,30 @@ export function ConnectionProvider({
     setError(null);
 
     try {
-      const res = await fetch("/api/vex", {
+      const url = buildUrl(creds.host);
+      const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          host: creds.host,
-          token_id: creds.token_id,
-          token_secret: creds.token_secret,
-          command: { type: "Status" },
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${creds.pairing}`,
+        },
+        body: JSON.stringify({ command: { type: "Status" } }),
       });
 
-      const data: VexApiResponse = await res.json();
-      if (!data.ok || !data.response) {
-        throw new Error(data.error || "Connection failed");
+      if (res.status === 401) {
+        throw new Error("Authentication failed");
       }
 
-      if (data.response.type === "DaemonStatus") {
-        setDaemonStatus(data.response.data);
+      const data: Response = await res.json();
+      if (data.type === "Error") {
+        const err = data.data;
+        throw new Error(
+          "code" in err && err.code === "Internal" ? err.message : err.code
+        );
+      }
+
+      if (data.type === "DaemonStatus") {
+        setDaemonStatus(data.data);
       }
 
       setCredentials(creds);

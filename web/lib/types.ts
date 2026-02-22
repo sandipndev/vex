@@ -1,6 +1,6 @@
 // TypeScript mirrors of crates/vex-cli/src/proto/mod.rs
 
-export const DEFAULT_TCP_PORT = 7422;
+export const DEFAULT_HTTP_PORT = 7423;
 
 // ── Wire types ──────────────────────────────────────────────────────────────
 
@@ -53,23 +53,3 @@ export type VexProtoError =
   | { code: "LocalOnly" }
   | { code: "NotFound" }
   | { code: "Internal"; message: string };
-
-export interface AuthToken {
-  token_id: string;
-  token_secret: string;
-}
-
-// ── API request/response ────────────────────────────────────────────────────
-
-export interface VexApiRequest {
-  host: string;
-  token_id: string;
-  token_secret: string;
-  command: Command;
-}
-
-export interface VexApiResponse {
-  ok: boolean;
-  response?: Response;
-  error?: string;
-}
