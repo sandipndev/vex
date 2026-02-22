@@ -24,9 +24,10 @@ setup() {
     TEST_HOME=$(mktemp -d)
     export TEST_HOME
 
-    # Assign a unique TCP port per test: 7500, 7501, 7502, …
-    TCP_PORT=$((7500 + BATS_TEST_NUMBER))
-    export TCP_PORT
+    # Assign unique ports per test: TCP 7500, 7502, 7504, … HTTP = TCP + 1
+    TCP_PORT=$((7500 + BATS_TEST_NUMBER * 2))
+    HTTP_PORT=$((TCP_PORT + 1))
+    export TCP_PORT HTTP_PORT
     export VEXD_TCP_PORT="$TCP_PORT"
 
     # Start daemon in the background using the isolated home and port

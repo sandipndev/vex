@@ -6,6 +6,7 @@ use vex_proto::{Command, Response, Transport, VexProtoError};
 
 use crate::state::AppState;
 
+pub mod http;
 pub mod tcp;
 pub mod unix;
 
@@ -30,7 +31,7 @@ where
     Ok(())
 }
 
-async fn dispatch(
+pub async fn dispatch(
     cmd: Command,
     state: &Arc<AppState>,
     transport: &Transport,
