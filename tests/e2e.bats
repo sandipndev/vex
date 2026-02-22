@@ -88,6 +88,31 @@ make_git_repo() {
         commit --allow-empty -m "init" >/dev/null 2>&1
 }
 
+# Create a bare "origin" repo and clone it, simulating a real cloned repository.
+# Sets ORIGIN_DIR and CLONE_DIR variables in the caller's scope.
+# The clone has 'main' checked out (like a real `git clone`).
+# Usage: make_cloned_repo
+make_cloned_repo() {
+    ORIGIN_DIR=$(mktemp -d)
+    CLONE_DIR=$(mktemp -d)
+    rmdir "$CLONE_DIR"  # git clone needs the target to not exist
+
+    # Create a bare origin with an initial commit on main
+    git init -b main --bare "$ORIGIN_DIR" >/dev/null 2>&1
+
+    # We need a temporary repo to push the initial commit into the bare origin
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    git clone "$ORIGIN_DIR" "$tmp_dir" >/dev/null 2>&1
+    git -C "$tmp_dir" -c user.email="t@t.com" -c user.name="T" \
+        commit --allow-empty -m "init" >/dev/null 2>&1
+    git -C "$tmp_dir" push origin main >/dev/null 2>&1
+    rm -rf "$tmp_dir"
+
+    # Clone from origin — this is the repo the user would register
+    git clone "$ORIGIN_DIR" "$CLONE_DIR" >/dev/null 2>&1
+}
+
 # Extract the pairing string from 'vexd pair' output.
 # Prints "tok_<hex>:<hex>" — the only token in that format in the output.
 pair_token() {
@@ -381,4 +406,105 @@ ZERO_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
     [ "$status" -eq 0 ]
     [[ "$output" == *"develop"* ]]
     rm -rf "$repo_dir"
+}
+
+# ── Cloned-repo workstream tests ─────────────────────────────────────────────
+# These tests use a proper bare-origin + clone setup that mirrors a real
+# `git clone` workflow, including an origin remote and tracking branches.
+
+@test "workstream: create on cloned repo auto-parks and checks out default branch" {
+    command -v tmux >/dev/null 2>&1 || skip "tmux not available"
+
+    make_cloned_repo
+    vex connect
+    vexd repo register "$CLONE_DIR"
+
+    local repo_id
+    repo_id=$(vex repo list | awk 'NR==2 {print $1}')
+
+    # main is currently checked out in the clone — vexd should auto-park
+    # (detach HEAD) and create the worktree successfully
+    run vex workstream create "$repo_id"
+    echo "OUTPUT: $output" >&3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"main"* ]]
+
+    # The workstream should appear in the list
+    run vex workstream list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"main"* ]]
+
+    rm -rf "$ORIGIN_DIR" "$CLONE_DIR"
+}
+
+@test "workstream: create on cloned repo with explicit branch from origin" {
+    command -v tmux >/dev/null 2>&1 || skip "tmux not available"
+
+    make_cloned_repo
+
+    # Push a feature branch to origin
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    git clone "$ORIGIN_DIR" "$tmp_dir" >/dev/null 2>&1
+    git -C "$tmp_dir" checkout -b feature/bar >/dev/null 2>&1
+    git -C "$tmp_dir" -c user.email="t@t.com" -c user.name="T" \
+        commit --allow-empty -m "feature commit" >/dev/null 2>&1
+    git -C "$tmp_dir" push origin feature/bar >/dev/null 2>&1
+    rm -rf "$tmp_dir"
+
+    vex connect
+    vexd repo register "$CLONE_DIR"
+
+    local repo_id
+    repo_id=$(vex repo list | awk 'NR==2 {print $1}')
+
+    # feature/bar doesn't exist locally but is on origin — DWIM should fetch
+    run vex workstream create "$repo_id" --branch feature/bar
+    echo "OUTPUT: $output" >&3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"feature/bar"* ]]
+
+    rm -rf "$ORIGIN_DIR" "$CLONE_DIR"
+}
+
+@test "workstream: create from a tag on a cloned repo" {
+    command -v tmux >/dev/null 2>&1 || skip "tmux not available"
+
+    make_cloned_repo
+
+    # Create a tag in the clone
+    git -C "$CLONE_DIR" tag v1.0.0 >/dev/null 2>&1
+
+    vex connect
+    vexd repo register "$CLONE_DIR"
+
+    local repo_id
+    repo_id=$(vex repo list | awk 'NR==2 {print $1}')
+
+    # Create a new branch from a tag using --from
+    run vex workstream create "$repo_id" --branch hotfix-1 --from v1.0.0
+    echo "OUTPUT: $output" >&3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hotfix-1"* ]]
+
+    rm -rf "$ORIGIN_DIR" "$CLONE_DIR"
+}
+
+@test "workstream: create with nonexistent branch shows available branches" {
+    command -v tmux >/dev/null 2>&1 || skip "tmux not available"
+
+    make_cloned_repo
+    vex connect
+    vexd repo register "$CLONE_DIR"
+
+    local repo_id
+    repo_id=$(vex repo list | awk 'NR==2 {print $1}')
+
+    # Try a branch that doesn't exist anywhere
+    run vex workstream create "$repo_id" --branch nonexistent-branch
+    echo "OUTPUT: $output" >&3
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+
+    rm -rf "$ORIGIN_DIR" "$CLONE_DIR"
 }

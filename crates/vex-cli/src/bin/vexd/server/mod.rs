@@ -398,6 +398,11 @@ async fn handle_workstream_create(
     let worktree_path = state.worktrees_dir().join(&ws_id);
     let tmux_session = format!("vex-{ws_id}");
 
+    // Ensure the worktrees parent directory exists
+    if let Err(e) = std::fs::create_dir_all(state.worktrees_dir()) {
+        return err(format!("failed to create worktrees dir: {e}"));
+    }
+
     // Create git worktree — two modes:
     // 1. from_ref is Some: create new local branch <branch> from the given ref
     // 2. DWIM: resolve local → remote → auto-fetch → error with branch list
@@ -408,20 +413,30 @@ async fn handle_workstream_create(
             return err(e);
         }
 
-        if local_branch_exists(&repo_path, &branch).await {
-            worktree_add_branch(&repo_path, &worktree_path, &branch).await
-        } else if remote_branch_exists(&repo_path, &branch).await {
-            worktree_add_tracking(&repo_path, &worktree_path, &branch).await
-        } else {
-            // Auto-fetch and retry
-            let _ = git_fetch_origin(&repo_path).await;
-            if remote_branch_exists(&repo_path, &branch).await {
-                worktree_add_tracking(&repo_path, &worktree_path, &branch).await
-            } else {
-                let list = list_all_branches(&repo_path).await;
-                return err(format!(
-                    "branch '{branch}' not found locally or on origin.\nAvailable branches:\n{list}"
-                ));
+        match local_branch_exists(&repo_path, &branch).await {
+            Err(e) => return err(e),
+            Ok(true) => worktree_add_branch(&repo_path, &worktree_path, &branch).await,
+            Ok(false) => {
+                match remote_branch_exists(&repo_path, &branch).await {
+                    Err(e) => return err(e),
+                    Ok(true) => worktree_add_tracking(&repo_path, &worktree_path, &branch).await,
+                    Ok(false) => {
+                        // Auto-fetch and retry
+                        let _ = git_fetch_origin(&repo_path).await;
+                        match remote_branch_exists(&repo_path, &branch).await {
+                            Err(e) => return err(e),
+                            Ok(true) => {
+                                worktree_add_tracking(&repo_path, &worktree_path, &branch).await
+                            }
+                            Ok(false) => {
+                                let list = list_all_branches(&repo_path).await.unwrap_or_default();
+                                return err(format!(
+                                    "branch '{branch}' not found locally or on origin.\nAvailable branches:\n{list}"
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
     };
@@ -432,13 +447,34 @@ async fn handle_workstream_create(
     };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let mut msg = format!("git worktree add failed: {}", stderr.trim());
-        if stderr.contains("already checked out") {
-            msg.push_str(
-                "\nHint: use --from <branch> --branch <new-name> to create a new branch from it.",
-            );
+
+        // If the branch is already checked out / used by the main worktree,
+        // automatically park it (detach HEAD) and retry — this is the common
+        // case when the user registers a repo where the default branch is active.
+        if stderr.contains("already checked out") || stderr.contains("already used by worktree") {
+            let parked = git_detach_head(&repo_path).await;
+            if parked {
+                let retry = worktree_add_branch(&repo_path, &worktree_path, &branch).await;
+                match retry {
+                    Ok(o2) if o2.status.success() => { /* fall through to hooks */ }
+                    Ok(o2) => {
+                        let msg = String::from_utf8_lossy(&o2.stderr);
+                        return err(format!(
+                            "git worktree add failed after parking: {}",
+                            msg.trim()
+                        ));
+                    }
+                    Err(e) => return err(format!("git worktree add failed after parking: {e}")),
+                }
+            } else {
+                return err(format!(
+                    "git worktree add failed: {}\nHint: use --from <branch> --branch <new-name> to create a new branch from it.",
+                    stderr.trim()
+                ));
+            }
+        } else {
+            return err(format!("git worktree add failed: {}", stderr.trim()));
         }
-        return err(msg);
     }
 
     // Run config hooks
@@ -1257,9 +1293,33 @@ async fn remove_worktree(repo_path: &str, worktree_path: &std::path::Path) -> an
 
 // ── Git helpers for worktree creation ─────────────────────────────────────────
 
-/// Check whether a local branch exists: `git branch --list <branch>`
-async fn local_branch_exists(repo_path: &str, branch: &str) -> bool {
-    tokio::process::Command::new("git")
+/// Resolve the absolute path to `git`. Cached after first call via the daemon's
+/// own PATH so that spawned subprocesses always find the right binary — even if
+/// the daemon was started from a nix-shell or other non-standard environment.
+fn git_bin() -> &'static str {
+    use std::sync::OnceLock;
+    static GIT: OnceLock<String> = OnceLock::new();
+    GIT.get_or_init(|| {
+        std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .ok()
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if o.status.success() && !s.is_empty() {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "git".to_string())
+    })
+}
+
+/// Check whether a local branch exists: `git branch --list <branch>`.
+/// Returns `Err` if git itself fails to run (e.g. not in PATH).
+async fn local_branch_exists(repo_path: &str, branch: &str) -> Result<bool, String> {
+    let out = tokio::process::Command::new(git_bin())
         .arg("-C")
         .arg(repo_path)
         .arg("branch")
@@ -1267,13 +1327,14 @@ async fn local_branch_exists(repo_path: &str, branch: &str) -> bool {
         .arg(branch)
         .output()
         .await
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    Ok(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
 }
 
-/// Check whether a remote tracking branch exists: `git rev-parse --verify origin/<branch>`
-async fn remote_branch_exists(repo_path: &str, branch: &str) -> bool {
-    tokio::process::Command::new("git")
+/// Check whether a remote tracking branch exists: `git rev-parse --verify origin/<branch>`.
+/// Returns `Err` if git itself fails to run.
+async fn remote_branch_exists(repo_path: &str, branch: &str) -> Result<bool, String> {
+    let out = tokio::process::Command::new(git_bin())
         .arg("-C")
         .arg(repo_path)
         .arg("rev-parse")
@@ -1281,13 +1342,13 @@ async fn remote_branch_exists(repo_path: &str, branch: &str) -> bool {
         .arg(format!("origin/{branch}"))
         .output()
         .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    Ok(out.status.success())
 }
 
 /// `git fetch origin` — returns an error string on failure, Ok(()) on success.
 async fn git_fetch_origin(repo_path: &str) -> Result<(), String> {
-    let out = tokio::process::Command::new("git")
+    let out = tokio::process::Command::new(git_bin())
         .arg("-C")
         .arg(repo_path)
         .arg("fetch")
@@ -1310,7 +1371,7 @@ async fn worktree_add_branch(
     worktree_path: &std::path::Path,
     branch: &str,
 ) -> std::io::Result<std::process::Output> {
-    tokio::process::Command::new("git")
+    tokio::process::Command::new(git_bin())
         .arg("-C")
         .arg(repo_path)
         .arg("worktree")
@@ -1328,7 +1389,7 @@ async fn worktree_add_tracking(
     worktree_path: &std::path::Path,
     branch: &str,
 ) -> std::io::Result<std::process::Output> {
-    tokio::process::Command::new("git")
+    tokio::process::Command::new(git_bin())
         .arg("-C")
         .arg(repo_path)
         .arg("worktree")
@@ -1350,7 +1411,7 @@ async fn worktree_add_new_branch(
     branch: &str,
     start_point: &str,
 ) -> std::io::Result<std::process::Output> {
-    tokio::process::Command::new("git")
+    tokio::process::Command::new(git_bin())
         .arg("-C")
         .arg(repo_path)
         .arg("worktree")
@@ -1364,16 +1425,30 @@ async fn worktree_add_new_branch(
 }
 
 /// List all branches (`git branch -a`) as a display string.
-async fn list_all_branches(repo_path: &str) -> String {
-    tokio::process::Command::new("git")
+async fn list_all_branches(repo_path: &str) -> Result<String, String> {
+    let out = tokio::process::Command::new(git_bin())
         .arg("-C")
         .arg(repo_path)
         .arg("branch")
         .arg("-a")
         .output()
         .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Detach HEAD in the main repo so that the branch is free for worktree checkout.
+/// Returns `true` if the detach succeeded.
+async fn git_detach_head(repo_path: &str) -> bool {
+    tokio::process::Command::new(git_bin())
+        .arg("-C")
+        .arg(repo_path)
+        .arg("checkout")
+        .arg("--detach")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
