@@ -103,6 +103,20 @@ async fn handle_key(
                     }
                 }
             }
+            KeyCode::Char('S') => {
+                // Spawn a new shell in the selected workstream
+                if let Some(ws_id) = app.selected_ws_id() {
+                    match spawn_shell(conn, ws_id).await {
+                        Ok(shell) => {
+                            app.status_msg = Some(format!("Spawned shell {}", shell.id));
+                            refresh_repos(conn, app).await;
+                        }
+                        Err(e) => {
+                            app.status_msg = Some(format!("Error: {e}"));
+                        }
+                    }
+                }
+            }
             KeyCode::Char('a') => {
                 if app.selected().is_some() {
                     app.mode = Mode::SpawnInput;
@@ -478,6 +492,19 @@ async fn create_workstream(
     let resp: Response = conn.recv().await?;
     match resp {
         Response::WorkstreamCreated(ws) => Ok(ws),
+        Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+async fn spawn_shell(
+    conn: &mut Connection,
+    workstream_id: String,
+) -> Result<vex_cli::ShellSession> {
+    conn.send(&Command::ShellSpawn { workstream_id }).await?;
+    let resp: Response = conn.recv().await?;
+    match resp {
+        Response::ShellSpawned(shell) => Ok(shell),
         Response::Error(e) => anyhow::bail!("{e:?}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }

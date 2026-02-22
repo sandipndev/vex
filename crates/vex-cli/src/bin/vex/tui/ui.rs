@@ -194,7 +194,11 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(format!("{:<12}", agents_str), Style::default()),
-                Span::raw("1 shell   "),
+                Span::raw(format!(
+                    "{} shell{} ",
+                    ws.shells.len(),
+                    if ws.shells.len() == 1 { " " } else { "s" },
+                )),
                 Span::styled(ws_status_str(&ws.status), Style::default().fg(status_color)),
             ]);
 
@@ -213,7 +217,7 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let content = match &app.mode {
         Mode::Normal => {
-            let keys = "↑↓ navigate   enter attach   a agent   c create   s shell   d delete   r refresh   q quit";
+            let keys = "↑↓ navigate   enter attach   a agent   c create   s shell   S spawn-shell   d delete   r refresh   q quit";
             let line = if let Some(msg) = &app.status_msg {
                 Line::from(vec![
                     Span::styled(msg.clone(), Style::default().fg(Color::Yellow)),

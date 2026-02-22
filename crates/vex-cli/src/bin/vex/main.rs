@@ -69,9 +69,14 @@ enum Commands {
     /// [internal] Background proxy daemon — do not call directly
     #[command(hide = true)]
     ProxyRun(ProxyRunArgs),
+    /// Shell commands
+    Shell {
+        #[command(subcommand)]
+        action: ShellCmd,
+    },
     /// [internal] Shell PTY supervisor — spawned by vexd inside tmux windows
-    #[command(hide = true)]
-    Shell(ShellArgs),
+    #[command(hide = true, name = "shell-supervisor")]
+    ShellSupervisor(ShellSupervisorArgs),
 }
 
 // ── Subcommand structs ────────────────────────────────────────────────────────
@@ -101,8 +106,32 @@ struct AttachArgs {
     single: Single,
 }
 
+// ── Shell subcommands ─────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum ShellCmd {
+    /// List shell sessions for a workstream
+    List {
+        workstream_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// Spawn a new shell window in a workstream
+    Spawn {
+        workstream_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+    /// Kill a shell session
+    Kill {
+        shell_id: String,
+        #[command(flatten)]
+        single: Single,
+    },
+}
+
 #[derive(Args)]
-struct ShellArgs {
+struct ShellSupervisorArgs {
     /// Workstream ID this shell belongs to
     #[arg(long)]
     workstream: String,
@@ -243,7 +272,8 @@ async fn main() -> Result<()> {
         Some(Commands::Start(args)) => cmd_start(args).await,
         Some(Commands::Stop) => cmd_stop(),
         Some(Commands::ProxyRun(args)) => cmd_proxy_run(args).await,
-        Some(Commands::Shell(args)) => cmd_shell(args).await,
+        Some(Commands::Shell { action }) => cmd_shell_command(action).await,
+        Some(Commands::ShellSupervisor(args)) => cmd_shell_supervisor(args).await,
         Some(Commands::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
             Ok(())
@@ -1293,9 +1323,77 @@ fn find_tcp_entry(cfg: &Config, name: Option<&str>) -> Result<(String, Connectio
     anyhow::bail!("No TCP connection found. Run 'vex connect --host <host:port>' to add one.")
 }
 
+// ── Shell subcommand dispatch ──────────────────────────────────────────────────
+
+async fn cmd_shell_command(action: ShellCmd) -> Result<()> {
+    match action {
+        ShellCmd::List {
+            workstream_id,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::ShellList {
+                workstream_id: workstream_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::ShellList(shells) => {
+                    if shells.is_empty() {
+                        println!("No shells in {workstream_id}.");
+                        return Ok(());
+                    }
+                    println!("{:<14} {:<10} {:<8} STARTED", "ID", "STATUS", "WINDOW");
+                    for s in &shells {
+                        let status = format!("{:?}", s.status);
+                        let ago = tui::app::format_ago(s.started_at);
+                        println!("{:<14} {:<10} {:<8} {ago}", s.id, status, s.tmux_window);
+                    }
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        ShellCmd::Spawn {
+            workstream_id,
+            single,
+        } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::ShellSpawn {
+                workstream_id: workstream_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::ShellSpawned(s) => {
+                    println!("Spawned shell {} in tmux window {}", s.id, s.tmux_window);
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+        ShellCmd::Kill { shell_id, single } => {
+            let (mut conn, _) = open_single_connection(single.connection).await?;
+            conn.send(&vex_proto::Command::ShellKill {
+                shell_id: shell_id.clone(),
+            })
+            .await?;
+            let resp: vex_proto::Response = conn.recv().await?;
+            match resp {
+                vex_proto::Response::ShellKilled => {
+                    println!("Killed shell {shell_id}.");
+                }
+                vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+                other => anyhow::bail!("Unexpected: {other:?}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 // ── Shell PTY supervisor ──────────────────────────────────────────────────────
 
-async fn cmd_shell(args: ShellArgs) -> Result<()> {
+async fn cmd_shell_supervisor(args: ShellSupervisorArgs) -> Result<()> {
     use base64::Engine;
     use std::io::{Read as _, Write as _};
 

@@ -475,12 +475,14 @@ async fn handle_workstream_create(
         .output()
         .await;
 
-    // Spawn `vex shell` in window 0 so it registers with vexd as a PTY supervisor.
+    // Spawn `vex shell-supervisor` in window 0 so it registers with vexd as a PTY supervisor.
     let _ = tokio::process::Command::new("tmux")
         .arg("send-keys")
         .arg("-t")
         .arg(format!("{tmux_session}:0"))
-        .arg(format!("vex shell --workstream {ws_id} --window 0"))
+        .arg(format!(
+            "vex shell-supervisor --workstream {ws_id} --window 0"
+        ))
         .arg("Enter")
         .output()
         .await;
@@ -895,13 +897,13 @@ async fn handle_shell_spawn(state: &Arc<AppState>, workstream_id: String) -> Res
         },
     };
 
-    // Launch `vex shell` PTY supervisor in the new window
+    // Launch `vex shell-supervisor` PTY supervisor in the new window
     let _ = tokio::process::Command::new("tmux")
         .arg("send-keys")
         .arg("-t")
         .arg(format!("{tmux_session}:{window_index}"))
         .arg(format!(
-            "vex shell --workstream {workstream_id} --window {window_index}"
+            "vex shell-supervisor --workstream {workstream_id} --window {window_index}"
         ))
         .arg("Enter")
         .output()
