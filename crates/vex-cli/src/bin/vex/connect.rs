@@ -217,6 +217,30 @@ impl Connection {
             Connection::Tcp(s) => framing::recv(s).await.map_err(Into::into),
         }
     }
+
+    /// Returns `true` if this is a local Unix socket connection.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Connection::Unix(_))
+    }
+
+    /// Consume the connection and return generic async read/write halves.
+    pub fn into_split(
+        self,
+    ) -> (
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ) {
+        match self {
+            Connection::Unix(s) => {
+                let (r, w) = tokio::io::split(s);
+                (Box::new(r), Box::new(w))
+            }
+            Connection::Tcp(s) => {
+                let (r, w) = tokio::io::split(*s);
+                (Box::new(r), Box::new(w))
+            }
+        }
+    }
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────

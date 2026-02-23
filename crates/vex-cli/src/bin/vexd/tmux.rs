@@ -114,6 +114,29 @@ pub fn kill_session(session: &str) -> Result<()> {
     Ok(())
 }
 
+/// Kill all vex-managed tmux sessions (those with names starting with `vex_`).
+pub fn kill_all_vex_sessions() {
+    let output = match Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+
+    if !output.status.success() {
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let name = line.trim();
+        if name.starts_with("vex_") {
+            let _ = kill_session(name);
+        }
+    }
+}
+
 /// List live window indices for a tmux session.
 pub fn list_windows(session: &str) -> Result<Vec<u32>> {
     let output = Command::new("tmux")

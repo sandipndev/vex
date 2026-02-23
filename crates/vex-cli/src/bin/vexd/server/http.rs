@@ -61,7 +61,13 @@ async fn handle_command(
         );
     };
 
-    let response = super::dispatch(body.command, &state, &Transport::Tcp, &Some(token_id)).await;
+    let result = super::dispatch(body.command, &state, &Transport::Tcp, &Some(token_id)).await;
+
+    // HTTP doesn't support attach mode — extract the response from DispatchResult
+    let response = match result {
+        super::DispatchResult::Reply(r) => r,
+        super::DispatchResult::AttachShell { response, .. } => response,
+    };
 
     let status = match &response {
         Response::Error(VexProtoError::Unauthorized) => StatusCode::UNAUTHORIZED,

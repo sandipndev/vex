@@ -19,7 +19,8 @@ export type Command =
   | { type: "WorkstreamDelete"; data: { project_name: string; name: string } }
   | { type: "ShellCreate"; data: { project_name: string; workstream_name: string } }
   | { type: "ShellList"; data: { project_name: string; workstream_name: string } }
-  | { type: "ShellDelete"; data: { project_name: string; workstream_name: string; shell_id: string } };
+  | { type: "ShellDelete"; data: { project_name: string; workstream_name: string; shell_id: string } }
+  | { type: "ShellAttach"; data: { project_name: string; workstream_name: string; shell_id?: string } };
 
 export type Response =
   | { type: "Pong" }
@@ -36,6 +37,7 @@ export type Response =
   | { type: "Workstreams"; data: WorkstreamInfo[] }
   | { type: "Shell"; data: ShellInfo }
   | { type: "Shells"; data: ShellInfo[] }
+  | { type: "ShellAttachReady"; data: { tmux_target: string } }
   | { type: "Error"; data: VexProtoError };
 
 export interface DaemonStatus {

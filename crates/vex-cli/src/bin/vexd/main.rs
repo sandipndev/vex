@@ -398,6 +398,10 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
         _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received, shutting down"),
     }
 
+    // Kill all vex-managed tmux sessions on shutdown
+    tracing::info!("cleaning up tmux sessions");
+    tmux::kill_all_vex_sessions();
+
     Ok(())
 }
 

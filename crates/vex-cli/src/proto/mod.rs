@@ -56,6 +56,12 @@ pub enum Command {
         workstream_name: String,
         shell_id: String,
     },
+    ShellAttach {
+        project_name: String,
+        workstream_name: String,
+        /// If omitted, attaches to the first shell in the workstream.
+        shell_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +97,9 @@ pub enum Response {
     Workstreams(Vec<WorkstreamInfo>),
     Shell(ShellInfo),
     Shells(Vec<ShellInfo>),
+    ShellAttachReady {
+        tmux_target: String,
+    },
     Error(VexProtoError),
 }
 
@@ -221,5 +230,84 @@ pub mod framing {
         let mut buf = vec![0u8; len as usize];
         r.read_exact(&mut buf).await?;
         Ok(serde_json::from_slice(&buf)?)
+    }
+}
+
+// ── Binary attach framing ────────────────────────────────────────────────────
+//
+// After the JSON ShellAttachReady response is sent, both sides switch to this
+// binary frame format for PTY passthrough:
+//   [1-byte tag][4-byte BE length][payload]
+// Tags: 0x00=Data, 0x01=Resize (4 bytes: 2×u16 BE cols+rows), 0x02=Close (empty payload)
+
+pub mod attach_frame {
+    use std::io;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+    const TAG_DATA: u8 = 0x00;
+    const TAG_RESIZE: u8 = 0x01;
+    const TAG_CLOSE: u8 = 0x02;
+
+    #[derive(Debug)]
+    pub enum Frame {
+        Data(Vec<u8>),
+        Resize { cols: u16, rows: u16 },
+        Close,
+    }
+
+    /// Send a data frame.
+    pub async fn send_data<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> io::Result<()> {
+        w.write_u8(TAG_DATA).await?;
+        w.write_u32(data.len() as u32).await?;
+        w.write_all(data).await?;
+        w.flush().await
+    }
+
+    /// Send a resize frame.
+    pub async fn send_resize<W: AsyncWrite + Unpin>(
+        w: &mut W,
+        cols: u16,
+        rows: u16,
+    ) -> io::Result<()> {
+        w.write_u8(TAG_RESIZE).await?;
+        w.write_u32(4).await?;
+        w.write_u16(cols).await?;
+        w.write_u16(rows).await?;
+        w.flush().await
+    }
+
+    /// Send a close frame.
+    pub async fn send_close<W: AsyncWrite + Unpin>(w: &mut W) -> io::Result<()> {
+        w.write_u8(TAG_CLOSE).await?;
+        w.write_u32(0).await?;
+        w.flush().await
+    }
+
+    /// Receive the next frame. Returns `None` on EOF.
+    pub async fn recv<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Frame>> {
+        let tag = match r.read_u8().await {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let len = r.read_u32().await?;
+
+        match tag {
+            TAG_DATA => {
+                let mut buf = vec![0u8; len as usize];
+                r.read_exact(&mut buf).await?;
+                Ok(Some(Frame::Data(buf)))
+            }
+            TAG_RESIZE => {
+                let cols = r.read_u16().await?;
+                let rows = r.read_u16().await?;
+                Ok(Some(Frame::Resize { cols, rows }))
+            }
+            TAG_CLOSE => Ok(Some(Frame::Close)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown attach frame tag: 0x{tag:02x}"),
+            )),
+        }
     }
 }

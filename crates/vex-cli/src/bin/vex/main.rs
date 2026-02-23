@@ -140,6 +140,17 @@ enum ShellCmd {
         #[command(flatten)]
         conn: ConnectionFlag,
     },
+    /// Attach to an interactive shell
+    Attach {
+        /// Project name
+        project_name: String,
+        /// Workstream name
+        workstream_name: String,
+        /// Shell ID (omit to attach to the first shell)
+        shell_id: Option<String>,
+        #[command(flatten)]
+        conn: ConnectionFlag,
+    },
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -224,6 +235,12 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            ShellCmd::Attach {
+                project_name,
+                workstream_name,
+                shell_id,
+                conn,
+            } => cmd_shell_attach(conn, project_name, workstream_name, shell_id).await,
         },
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
@@ -655,6 +672,130 @@ async fn run_shell_delete(
         vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
         other => anyhow::bail!("Unexpected response: {other:?}"),
     }
+    Ok(())
+}
+
+// ── Shell attach ─────────────────────────────────────────────────────────────
+
+async fn cmd_shell_attach(
+    flag: ConnectionFlag,
+    project_name: String,
+    workstream_name: String,
+    shell_id: Option<String>,
+) -> Result<()> {
+    let mut cfg = Config::load()?;
+    let name: String = {
+        let conn_name = flag.connection.as_deref();
+        let (n, _) = cfg.resolve(conn_name)?;
+        n
+    };
+    let entry = cfg
+        .connections
+        .get_mut(&name)
+        .expect("resolve verified key exists");
+    let fp_before = entry.tls_fingerprint.clone();
+    let mut conn = Connection::from_entry(entry).await?;
+    if entry.tls_fingerprint != fp_before {
+        cfg.save()?;
+    }
+
+    // Send ShellAttach command
+    conn.send(&vex_proto::Command::ShellAttach {
+        project_name,
+        workstream_name,
+        shell_id,
+    })
+    .await?;
+    let response: vex_proto::Response = conn.recv().await?;
+
+    match response {
+        vex_proto::Response::ShellAttachReady { tmux_target } => {
+            if conn.is_local() {
+                // Local: exec tmux attach directly (replaces this process)
+                drop(conn);
+                let err = std::os::unix::process::CommandExt::exec(
+                    std::process::Command::new("tmux").args(["attach-session", "-t", &tmux_target]),
+                );
+                // exec() only returns on error
+                anyhow::bail!("exec tmux failed: {err}");
+            } else {
+                // Remote: PTY passthrough over the TLS connection
+                run_remote_attach(conn).await
+            }
+        }
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+async fn run_remote_attach(conn: Connection) -> Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+
+    let result = run_remote_attach_inner(conn).await;
+
+    // Always restore terminal, even on error
+    let _ = crossterm::terminal::disable_raw_mode();
+
+    result
+}
+
+async fn run_remote_attach_inner(conn: Connection) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use vex_proto::attach_frame;
+
+    let (mut net_read, mut net_write) = conn.into_split();
+
+    // Send initial terminal size
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    attach_frame::send_resize(&mut net_write, cols, rows).await?;
+
+    let mut stdin_buf = vec![0u8; 1024];
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
+    let mut sigwinch =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+
+    loop {
+        tokio::select! {
+            // stdin → network
+            result = stdin.read(&mut stdin_buf) => {
+                match result {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if attach_frame::send_data(&mut net_write, &stdin_buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            // network → stdout
+            frame = attach_frame::recv(&mut net_read) => {
+                match frame {
+                    Ok(Some(attach_frame::Frame::Data(data))) => {
+                        if stdout.write_all(&data).await.is_err() {
+                            break;
+                        }
+                        let _ = stdout.flush().await;
+                    }
+                    Ok(Some(attach_frame::Frame::Close)) | Ok(None) | Err(_) => break,
+                    Ok(Some(attach_frame::Frame::Resize { .. })) => {
+                        // Server shouldn't send resize, ignore
+                    }
+                }
+            }
+            // Terminal resize → network
+            _ = sigwinch.recv() => {
+                if let Ok((cols, rows)) = crossterm::terminal::size() {
+                    let _ = attach_frame::send_resize(&mut net_write, cols, rows).await;
+                }
+            }
+        }
+    }
+
+    // Best-effort close
+    let _ = attach_frame::send_close(&mut net_write).await;
+
     Ok(())
 }
 
