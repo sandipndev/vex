@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
-# Repository registration tests — local daemon (Unix socket).
+# Project registration tests — local daemon (Unix socket).
 #
 # Requires: bats-core >= 1.9
-# Run:  bats tests/repo.bats
+# Run:  bats tests/project.bats
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 VEXD_BIN="$REPO_ROOT/target/debug/vexd"
@@ -29,7 +29,7 @@ setup() {
     VEXD_PID=$!
     export VEXD_PID
 
-    local sock="$TEST_HOME/.vexd/vexd.sock"
+    local sock="$TEST_HOME/.vex/vexd.sock"
     local i=0
     while (( i < 50 )); do
         if [[ -S "$sock" ]] \
@@ -67,83 +67,83 @@ pair_token() {
 
 # ── Tests ─────────────────────────────────────────────────────────────────
 
-@test "repo: register succeeds with valid path" {
+@test "project: register succeeds with valid path" {
     local tmpdir
     tmpdir=$(mktemp -d)
 
-    run vexd repo register myrepo "$tmpdir"
+    run vexd project register myproject owner/myproject "$tmpdir"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Registered"* ]]
-    [[ "$output" == *"myrepo"* ]]
+    [[ "$output" == *"myproject"* ]]
 
     rm -rf "$tmpdir"
 }
 
-@test "repo: list shows registered repo" {
+@test "project: list shows registered project" {
     local tmpdir
     tmpdir=$(mktemp -d)
 
-    vexd repo register myrepo "$tmpdir"
+    vexd project register myproject owner/myproject "$tmpdir"
 
-    run vexd repo list
+    run vexd project list
     [ "$status" -eq 0 ]
-    [[ "$output" == *"myrepo"* ]]
+    [[ "$output" == *"myproject"* ]]
     [[ "$output" == *"$tmpdir"* ]]
 
     rm -rf "$tmpdir"
 }
 
-@test "repo: unregister removes a repo" {
+@test "project: unregister removes a project" {
     local tmpdir
     tmpdir=$(mktemp -d)
 
-    vexd repo register myrepo "$tmpdir"
-    run vexd repo unregister myrepo
+    vexd project register myproject owner/myproject "$tmpdir"
+    run vexd project unregister myproject
     [ "$status" -eq 0 ]
     [[ "$output" == *"Unregistered"* ]]
 
-    run vexd repo list
+    run vexd project list
     [ "$status" -eq 0 ]
     [[ "$output" == *"No registered"* ]]
 
     rm -rf "$tmpdir"
 }
 
-@test "repo: register rejects non-existent path" {
-    run vexd repo register badrepo /tmp/does-not-exist-ever-12345
+@test "project: register rejects non-existent path" {
+    run vexd project register badproject owner/badproject /tmp/does-not-exist-ever-12345
     [ "$status" -ne 0 ]
 }
 
-@test "repo: register rejects duplicate name" {
+@test "project: register rejects duplicate name" {
     local tmpdir
     tmpdir=$(mktemp -d)
 
-    vexd repo register dup "$tmpdir"
+    vexd project register dup owner/dup "$tmpdir"
 
-    run vexd repo register dup "$tmpdir"
+    run vexd project register dup owner/dup "$tmpdir"
     [ "$status" -ne 0 ]
     [[ "$output" == *"already registered"* ]]
 
     rm -rf "$tmpdir"
 }
 
-@test "repo: list is available over TCP" {
+@test "project: list is available over TCP" {
     local tmpdir
     tmpdir=$(mktemp -d)
-    vexd repo register tcprepo "$tmpdir"
+    vexd project register tcpproject owner/tcpproject "$tmpdir"
 
     local pairing
     pairing=$(pair_token)
     vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
-    run vex repos
+    run vex projects
     [ "$status" -eq 0 ]
-    [[ "$output" == *"tcprepo"* ]]
+    [[ "$output" == *"tcpproject"* ]]
 
     rm -rf "$tmpdir"
 }
 
-@test "repo: register is rejected over TCP" {
+@test "project: register is rejected over TCP" {
     local tmpdir
     tmpdir=$(mktemp -d)
 
@@ -151,28 +151,28 @@ pair_token() {
     pairing=$(pair_token)
     vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
-    # vex client doesn't have a register subcommand for repos, so we test
-    # via the vex repos command which only does RepoList. The LocalOnly
+    # vex client doesn't have a register subcommand for projects, so we test
+    # via the vex projects command which only does ProjectList. The LocalOnly
     # guard is verified by the fact that register/unregister are only
     # accessible via the vexd admin CLI (Unix socket).
     # We can verify the client list works but cannot register remotely.
-    run vex repos
+    run vex projects
     [ "$status" -eq 0 ]
-    [[ "$output" == *"No registered"* ]] || [[ "$output" == *"tcprepo"* ]] || true
+    [[ "$output" == *"No registered"* ]] || [[ "$output" == *"tcpproject"* ]] || true
 
     rm -rf "$tmpdir"
 }
 
-@test "repo: vex repos via unix socket" {
+@test "project: vex projects via unix socket" {
     local tmpdir
     tmpdir=$(mktemp -d)
-    vexd repo register localrepo "$tmpdir"
+    vexd project register localproject owner/localproject "$tmpdir"
 
     vex connect
 
-    run vex repos
+    run vex projects
     [ "$status" -eq 0 ]
-    [[ "$output" == *"localrepo"* ]]
+    [[ "$output" == *"localproject"* ]]
 
     rm -rf "$tmpdir"
 }

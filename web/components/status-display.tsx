@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useConnection } from "./connection-provider";
-import type { RepoInfo, WorkstreamInfo } from "@/lib/types";
+import type { ProjectInfo, WorkstreamInfo } from "@/lib/types";
 
 function formatUptime(secs: number): string {
   const days = Math.floor(secs / 86400);
@@ -20,21 +20,21 @@ function formatUptime(secs: number): string {
 
 export function StatusDisplay() {
   const { daemonStatus, credentials, disconnect, sendCommand } = useConnection();
-  const [repos, setRepos] = useState<RepoInfo[]>([]);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [workstreams, setWorkstreams] = useState<Record<string, WorkstreamInfo[]>>({});
   const [newWsName, setNewWsName] = useState<Record<string, string>>({});
 
   const fetchWorkstreams = useCallback(
-    async (repoList: RepoInfo[]) => {
+    async (projectList: ProjectInfo[]) => {
       const ws: Record<string, WorkstreamInfo[]> = {};
-      for (const repo of repoList) {
+      for (const project of projectList) {
         try {
           const res = await sendCommand({
             type: "WorkstreamList",
-            data: { repo_name: repo.name },
+            data: { project_name: project.name },
           });
           if (res.type === "Workstreams") {
-            ws[repo.name] = res.data;
+            ws[project.name] = res.data;
           }
         } catch {
           // ignore
@@ -45,56 +45,56 @@ export function StatusDisplay() {
     [sendCommand],
   );
 
-  const fetchRepos = useCallback(async () => {
+  const fetchProjects = useCallback(async () => {
     try {
-      const res = await sendCommand({ type: "RepoList" });
-      if (res.type === "Repos") {
-        setRepos(res.data);
+      const res = await sendCommand({ type: "ProjectList" });
+      if (res.type === "Projects") {
+        setProjects(res.data);
         await fetchWorkstreams(res.data);
       }
     } catch {
-      // ignore — repos are supplemental info
+      // ignore — projects are supplemental info
     }
   }, [sendCommand, fetchWorkstreams]);
 
   const createWorkstream = useCallback(
-    async (repoName: string) => {
-      const name = newWsName[repoName]?.trim();
+    async (projectName: string) => {
+      const name = newWsName[projectName]?.trim();
       if (!name) return;
       try {
         await sendCommand({
           type: "WorkstreamCreate",
-          data: { repo_name: repoName, name },
+          data: { project_name: projectName, name },
         });
-        setNewWsName((prev) => ({ ...prev, [repoName]: "" }));
-        await fetchRepos();
+        setNewWsName((prev) => ({ ...prev, [projectName]: "" }));
+        await fetchProjects();
       } catch {
         // ignore
       }
     },
-    [sendCommand, newWsName, fetchRepos],
+    [sendCommand, newWsName, fetchProjects],
   );
 
   const deleteWorkstream = useCallback(
-    async (repoName: string, wsName: string) => {
+    async (projectName: string, wsName: string) => {
       try {
         await sendCommand({
           type: "WorkstreamDelete",
-          data: { repo_name: repoName, name: wsName },
+          data: { project_name: projectName, name: wsName },
         });
-        await fetchRepos();
+        await fetchProjects();
       } catch {
         // ignore
       }
     },
-    [sendCommand, fetchRepos],
+    [sendCommand, fetchProjects],
   );
 
   useEffect(() => {
     if (daemonStatus && credentials) {
-      fetchRepos();
+      fetchProjects();
     }
-  }, [daemonStatus, credentials, fetchRepos]);
+  }, [daemonStatus, credentials, fetchProjects]);
 
   if (!daemonStatus || !credentials) return null;
 
@@ -134,22 +134,22 @@ export function StatusDisplay() {
         </div>
       </div>
 
-      <div data-cy="repos-section" className="border border-neutral-700 rounded p-6 space-y-4">
-        <h2 className="text-lg font-semibold text-white">Repositories</h2>
-        {repos.length === 0 ? (
-          <p data-cy="repos-empty" className="text-sm text-neutral-400">
-            No repositories registered
+      <div data-cy="projects-section" className="border border-neutral-700 rounded p-6 space-y-4">
+        <h2 className="text-lg font-semibold text-white">Projects</h2>
+        {projects.length === 0 ? (
+          <p data-cy="projects-empty" className="text-sm text-neutral-400">
+            No projects registered
           </p>
         ) : (
           <div className="space-y-4 text-sm">
-            {repos.map((r) => (
-              <div key={r.name} data-cy="repo-item" className="space-y-2">
+            {projects.map((p) => (
+              <div key={p.name} data-cy="project-item" className="space-y-2">
                 <div className="flex justify-between">
-                  <span className="text-white font-mono">{r.name}</span>
-                  <span className="text-neutral-400 font-mono truncate ml-4">{r.path}</span>
+                  <span className="text-white font-mono">{p.name}</span>
+                  <span className="text-neutral-400 font-mono truncate ml-4">{p.path}</span>
                 </div>
                 <div className="ml-4 space-y-1">
-                  {(workstreams[r.name] ?? []).map((ws) => (
+                  {(workstreams[p.name] ?? []).map((ws) => (
                     <div
                       key={ws.name}
                       data-cy="workstream-item"
@@ -160,7 +160,7 @@ export function StatusDisplay() {
                       </span>
                       <button
                         data-cy="workstream-delete"
-                        onClick={() => deleteWorkstream(r.name, ws.name)}
+                        onClick={() => deleteWorkstream(p.name, ws.name)}
                         className="text-xs text-neutral-500 hover:text-red-400 transition-colors"
                       >
                         delete
@@ -172,18 +172,18 @@ export function StatusDisplay() {
                     className="flex gap-2 mt-1"
                     onSubmit={(e) => {
                       e.preventDefault();
-                      createWorkstream(r.name);
+                      createWorkstream(p.name);
                     }}
                   >
                     <input
                       data-cy="workstream-name-input"
                       type="text"
                       placeholder="workstream name"
-                      value={newWsName[r.name] ?? ""}
+                      value={newWsName[p.name] ?? ""}
                       onChange={(e) =>
                         setNewWsName((prev) => ({
                           ...prev,
-                          [r.name]: e.target.value,
+                          [p.name]: e.target.value,
                         }))
                       }
                       className="flex-1 bg-transparent border border-neutral-700 rounded px-2 py-1 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-neutral-500"

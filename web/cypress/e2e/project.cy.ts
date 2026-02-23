@@ -1,4 +1,4 @@
-// Repository listing e2e tests against a Docker vexd container.
+// Project listing e2e tests against a Docker vexd container.
 //
 // Expects:
 //   - vexd running in container "vex-web-test" with HTTP port 9423 mapped to 7423
@@ -22,11 +22,11 @@ function fillAndConnect(host: string, pairing: string) {
   cy.get("[data-cy=connect-button]").click();
 }
 
-describe("Repository listing", () => {
+describe("Project listing", () => {
   beforeEach(() => {
-    // Clean up any repos left over from previous tests
+    // Clean up any projects left over from previous tests
     cy.exec(
-      "docker exec vex-web-test vexd repo list || true"
+      "docker exec vex-web-test vexd project list || true"
     ).then((result) => {
       const names = result.stdout
         .split("\n")
@@ -34,7 +34,7 @@ describe("Repository listing", () => {
         .filter((n) => n && n !== "No");
       for (const name of names) {
         cy.exec(
-          `docker exec vex-web-test vexd repo unregister ${name}`
+          `docker exec vex-web-test vexd project unregister ${name}`
         );
       }
     });
@@ -44,26 +44,26 @@ describe("Repository listing", () => {
     cy.reload();
   });
 
-  it("shows empty state when no repos registered", () => {
+  it("shows empty state when no projects registered", () => {
     pairToken().then((pairing) => {
       fillAndConnect(VEX_HOST, pairing);
       cy.get("[data-cy=status-version]", { timeout: 10000 }).should(
         "contain",
         "vexd v"
       );
-      cy.get("[data-cy=repos-section]").should("exist");
-      cy.get("[data-cy=repos-empty]").should(
+      cy.get("[data-cy=projects-section]").should("exist");
+      cy.get("[data-cy=projects-empty]").should(
         "contain",
-        "No repositories registered"
+        "No projects registered"
       );
     });
   });
 
-  it("shows registered repo in web UI", () => {
-    // Register a repo inside the container
+  it("shows registered project in web UI", () => {
+    // Register a project inside the container
     cy.exec("docker exec vex-web-test mkdir -p /tmp/test-repo");
     cy.exec(
-      "docker exec vex-web-test vexd repo register test-repo /tmp/test-repo"
+      "docker exec vex-web-test vexd project register test-project owner/test-repo /tmp/test-repo"
     );
 
     pairToken().then((pairing) => {
@@ -72,8 +72,8 @@ describe("Repository listing", () => {
         "contain",
         "vexd v"
       );
-      cy.get("[data-cy=repos-section]").should("exist");
-      cy.get("[data-cy=repo-item]").should("contain", "test-repo");
+      cy.get("[data-cy=projects-section]").should("exist");
+      cy.get("[data-cy=project-item]").should("contain", "test-project");
     });
   });
 });
