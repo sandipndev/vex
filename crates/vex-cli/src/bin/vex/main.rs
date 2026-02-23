@@ -40,6 +40,11 @@ enum Commands {
     Whoami(ConnectionFlag),
     /// List registered repositories
     Repos(ConnectionFlag),
+    /// Manage workstreams under a repository
+    Workstream {
+        #[command(subcommand)]
+        action: WorkstreamCmd,
+    },
     /// Print shell completion script
     Completions {
         /// Shell to generate completions for
@@ -70,6 +75,35 @@ struct ConnectionFlag {
     all: bool,
 }
 
+#[derive(Subcommand)]
+enum WorkstreamCmd {
+    /// Create a new workstream under a repository
+    Create {
+        /// Repository name
+        repo_name: String,
+        /// Workstream name
+        name: String,
+        #[command(flatten)]
+        conn: ConnectionFlag,
+    },
+    /// List workstreams for a repository
+    List {
+        /// Repository name
+        repo_name: String,
+        #[command(flatten)]
+        conn: ConnectionFlag,
+    },
+    /// Delete a workstream by name
+    Delete {
+        /// Repository name
+        repo_name: String,
+        /// Workstream name
+        name: String,
+        #[command(flatten)]
+        conn: ConnectionFlag,
+    },
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -88,6 +122,21 @@ async fn main() -> Result<()> {
         Commands::Status(flag) => cmd_with_connections(flag, DaemonCmd::Status).await,
         Commands::Whoami(flag) => cmd_with_connections(flag, DaemonCmd::Whoami).await,
         Commands::Repos(flag) => cmd_with_connections(flag, DaemonCmd::Repos).await,
+        Commands::Workstream { action } => match action {
+            WorkstreamCmd::Create {
+                repo_name,
+                name,
+                conn,
+            } => cmd_with_connections(conn, DaemonCmd::WorkstreamCreate { repo_name, name }).await,
+            WorkstreamCmd::List { repo_name, conn } => {
+                cmd_with_connections(conn, DaemonCmd::WorkstreamList { repo_name }).await
+            }
+            WorkstreamCmd::Delete {
+                repo_name,
+                name,
+                conn,
+            } => cmd_with_connections(conn, DaemonCmd::WorkstreamDelete { repo_name, name }).await,
+        },
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
             Ok(())
@@ -227,11 +276,14 @@ fn cmd_list() -> Result<()> {
 
 // ── Generic command runner ────────────────────────────────────────────────────
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum DaemonCmd {
     Status,
     Whoami,
     Repos,
+    WorkstreamCreate { repo_name: String, name: String },
+    WorkstreamList { repo_name: String },
+    WorkstreamDelete { repo_name: String, name: String },
 }
 
 async fn run_cmd(conn: &mut Connection, cmd: DaemonCmd) -> Result<()> {
@@ -239,6 +291,13 @@ async fn run_cmd(conn: &mut Connection, cmd: DaemonCmd) -> Result<()> {
         DaemonCmd::Status => run_status(conn).await,
         DaemonCmd::Whoami => run_whoami(conn).await,
         DaemonCmd::Repos => run_repos(conn).await,
+        DaemonCmd::WorkstreamCreate { repo_name, name } => {
+            run_workstream_create(conn, repo_name, name).await
+        }
+        DaemonCmd::WorkstreamList { repo_name } => run_workstream_list(conn, repo_name).await,
+        DaemonCmd::WorkstreamDelete { repo_name, name } => {
+            run_workstream_delete(conn, repo_name, name).await
+        }
     }
 }
 
@@ -258,7 +317,7 @@ async fn cmd_with_connections(flag: ConnectionFlag, cmd: DaemonCmd) -> Result<()
                     if entry.tls_fingerprint != fp_before {
                         cfg_changed = true;
                     }
-                    if let Err(e) = run_cmd(&mut conn, cmd).await {
+                    if let Err(e) = run_cmd(&mut conn, cmd.clone()).await {
                         eprintln!("error: {e}");
                         any_error = true;
                     }
@@ -343,6 +402,65 @@ async fn run_repos(conn: &mut Connection) -> Result<()> {
             }
         }
         other => println!("{other:?}"),
+    }
+    Ok(())
+}
+
+async fn run_workstream_create(
+    conn: &mut Connection,
+    repo_name: String,
+    name: String,
+) -> Result<()> {
+    conn.send(&vex_proto::Command::WorkstreamCreate { repo_name, name })
+        .await?;
+    let response: vex_proto::Response = conn.recv().await?;
+    match response {
+        vex_proto::Response::Workstream(ws) => {
+            println!(
+                "Created workstream '{}' in repo '{}'",
+                ws.name, ws.repo_name
+            );
+        }
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn run_workstream_list(conn: &mut Connection, repo_name: String) -> Result<()> {
+    conn.send(&vex_proto::Command::WorkstreamList { repo_name })
+        .await?;
+    let response: vex_proto::Response = conn.recv().await?;
+    match response {
+        vex_proto::Response::Workstreams(ws) => {
+            if ws.is_empty() {
+                println!("No workstreams.");
+            }
+            for w in &ws {
+                println!("{}", w.name);
+            }
+        }
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn run_workstream_delete(
+    conn: &mut Connection,
+    repo_name: String,
+    name: String,
+) -> Result<()> {
+    conn.send(&vex_proto::Command::WorkstreamDelete {
+        repo_name,
+        name: name.clone(),
+    })
+    .await?;
+    let response: vex_proto::Response = conn.recv().await?;
+    match response {
+        vex_proto::Response::Ok => println!("Deleted workstream '{name}'."),
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
     }
     Ok(())
 }

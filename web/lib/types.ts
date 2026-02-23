@@ -13,7 +13,10 @@ export type Command =
   | { type: "PairRevokeAll" }
   | { type: "RepoRegister"; data: { name: string; path: string } }
   | { type: "RepoUnregister"; data: { name: string } }
-  | { type: "RepoList" };
+  | { type: "RepoList" }
+  | { type: "WorkstreamCreate"; data: { repo_name: string; name: string } }
+  | { type: "WorkstreamList"; data: { repo_name: string } }
+  | { type: "WorkstreamDelete"; data: { repo_name: string; name: string } };
 
 export type Response =
   | { type: "Pong" }
@@ -26,6 +29,8 @@ export type Response =
   | { type: "Revoked"; data: number }
   | { type: "Repo"; data: RepoInfo }
   | { type: "Repos"; data: RepoInfo[] }
+  | { type: "Workstream"; data: WorkstreamInfo }
+  | { type: "Workstreams"; data: WorkstreamInfo[] }
   | { type: "Error"; data: VexProtoError };
 
 export interface DaemonStatus {
@@ -51,6 +56,11 @@ export interface PairedClient {
 export interface RepoInfo {
   name: string;
   path: string;
+}
+
+export interface WorkstreamInfo {
+  name: string;
+  repo_name: string;
 }
 
 export interface ClientInfo {

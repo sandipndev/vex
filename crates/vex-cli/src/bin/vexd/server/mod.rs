@@ -142,5 +142,39 @@ pub async fn dispatch(
                 .collect();
             Response::Repos(repos)
         }
+
+        Command::WorkstreamCreate { repo_name, name } => {
+            let mut store = state.repo_store.lock().await;
+            match store.create_workstream(&repo_name, name.clone()) {
+                Ok(()) => Response::Workstream(vex_proto::WorkstreamInfo { name, repo_name }),
+                Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
+            }
+        }
+
+        Command::WorkstreamList { repo_name } => {
+            let store = state.repo_store.lock().await;
+            match store.list_workstreams(&repo_name) {
+                Ok(ws) => {
+                    let items = ws
+                        .iter()
+                        .map(|w| vex_proto::WorkstreamInfo {
+                            name: w.name.clone(),
+                            repo_name: repo_name.clone(),
+                        })
+                        .collect();
+                    Response::Workstreams(items)
+                }
+                Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
+            }
+        }
+
+        Command::WorkstreamDelete { repo_name, name } => {
+            let mut store = state.repo_store.lock().await;
+            match store.delete_workstream(&repo_name, &name) {
+                Ok(true) => Response::Ok,
+                Ok(false) => Response::Error(VexProtoError::NotFound),
+                Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
+            }
+        }
     }
 }

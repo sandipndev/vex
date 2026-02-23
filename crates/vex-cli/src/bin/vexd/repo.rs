@@ -3,9 +3,16 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkstreamEntry {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoEntry {
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub workstreams: Vec<WorkstreamEntry>,
 }
 
 pub struct RepoStore {
@@ -53,6 +60,7 @@ impl RepoStore {
         let entry = RepoEntry {
             name,
             path: resolved.to_string_lossy().to_string(),
+            workstreams: vec![],
         };
         self.repos.push(entry.clone());
         self.save()?;
@@ -71,5 +79,47 @@ impl RepoStore {
 
     pub fn list(&self) -> &[RepoEntry] {
         &self.repos
+    }
+
+    pub fn create_workstream(&mut self, repo_name: &str, ws_name: String) -> Result<()> {
+        let repo = self
+            .repos
+            .iter_mut()
+            .find(|r| r.name == repo_name)
+            .ok_or_else(|| anyhow::anyhow!("repository '{}' not found", repo_name))?;
+        if repo.workstreams.iter().any(|w| w.name == ws_name) {
+            anyhow::bail!(
+                "workstream '{}' already exists in repo '{}'",
+                ws_name,
+                repo_name
+            );
+        }
+        repo.workstreams.push(WorkstreamEntry { name: ws_name });
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn list_workstreams(&self, repo_name: &str) -> Result<&[WorkstreamEntry]> {
+        let repo = self
+            .repos
+            .iter()
+            .find(|r| r.name == repo_name)
+            .ok_or_else(|| anyhow::anyhow!("repository '{}' not found", repo_name))?;
+        Ok(&repo.workstreams)
+    }
+
+    pub fn delete_workstream(&mut self, repo_name: &str, ws_name: &str) -> Result<bool> {
+        let repo = self
+            .repos
+            .iter_mut()
+            .find(|r| r.name == repo_name)
+            .ok_or_else(|| anyhow::anyhow!("repository '{}' not found", repo_name))?;
+        let before = repo.workstreams.len();
+        repo.workstreams.retain(|w| w.name != ws_name);
+        let removed = repo.workstreams.len() < before;
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
     }
 }
