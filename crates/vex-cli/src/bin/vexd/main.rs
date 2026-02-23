@@ -4,7 +4,9 @@ mod auth;
 mod local;
 mod project;
 mod server;
+mod shell;
 mod state;
+mod tmux;
 
 use std::{
     fs::{File, OpenOptions},
@@ -362,6 +364,7 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
         tls_dir.clone(),
     ));
     let http_handle = tokio::spawn(server::http::serve_http(state.clone(), http_addr, tls_dir));
+    let monitor_handle = tokio::spawn(shell::shell_monitor(state.clone()));
 
     use tokio::signal::unix::{SignalKind, signal};
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -390,6 +393,7 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
                 Err(e) => tracing::error!("HTTP server panicked: {e}"),
             }
         }
+        _ = monitor_handle => tracing::info!("Shell monitor stopped"),
         _ = sigterm.recv() => tracing::info!("SIGTERM received, shutting down"),
         _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received, shutting down"),
     }

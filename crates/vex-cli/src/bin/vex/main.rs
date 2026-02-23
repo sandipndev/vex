@@ -45,6 +45,11 @@ enum Commands {
         #[command(subcommand)]
         action: WorkstreamCmd,
     },
+    /// Manage shells in a workstream
+    Shell {
+        #[command(subcommand)]
+        action: ShellCmd,
+    },
     /// Print shell completion script
     Completions {
         /// Shell to generate completions for
@@ -104,6 +109,39 @@ enum WorkstreamCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ShellCmd {
+    /// Create a new shell in a workstream
+    Create {
+        /// Project name
+        project_name: String,
+        /// Workstream name
+        workstream_name: String,
+        #[command(flatten)]
+        conn: ConnectionFlag,
+    },
+    /// List shells in a workstream
+    List {
+        /// Project name
+        project_name: String,
+        /// Workstream name
+        workstream_name: String,
+        #[command(flatten)]
+        conn: ConnectionFlag,
+    },
+    /// Delete a shell by ID
+    Delete {
+        /// Project name
+        project_name: String,
+        /// Workstream name
+        workstream_name: String,
+        /// Shell ID (e.g. shell_1)
+        shell_id: String,
+        #[command(flatten)]
+        conn: ConnectionFlag,
+    },
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -139,6 +177,52 @@ async fn main() -> Result<()> {
                 conn,
             } => {
                 cmd_with_connections(conn, DaemonCmd::WorkstreamDelete { project_name, name }).await
+            }
+        },
+        Commands::Shell { action } => match action {
+            ShellCmd::Create {
+                project_name,
+                workstream_name,
+                conn,
+            } => {
+                cmd_with_connections(
+                    conn,
+                    DaemonCmd::ShellCreate {
+                        project_name,
+                        workstream_name,
+                    },
+                )
+                .await
+            }
+            ShellCmd::List {
+                project_name,
+                workstream_name,
+                conn,
+            } => {
+                cmd_with_connections(
+                    conn,
+                    DaemonCmd::ShellList {
+                        project_name,
+                        workstream_name,
+                    },
+                )
+                .await
+            }
+            ShellCmd::Delete {
+                project_name,
+                workstream_name,
+                shell_id,
+                conn,
+            } => {
+                cmd_with_connections(
+                    conn,
+                    DaemonCmd::ShellDelete {
+                        project_name,
+                        workstream_name,
+                        shell_id,
+                    },
+                )
+                .await
             }
         },
         Commands::Completions { shell } => {
@@ -285,9 +369,30 @@ enum DaemonCmd {
     Status,
     Whoami,
     Projects,
-    WorkstreamCreate { project_name: String, name: String },
-    WorkstreamList { project_name: String },
-    WorkstreamDelete { project_name: String, name: String },
+    WorkstreamCreate {
+        project_name: String,
+        name: String,
+    },
+    WorkstreamList {
+        project_name: String,
+    },
+    WorkstreamDelete {
+        project_name: String,
+        name: String,
+    },
+    ShellCreate {
+        project_name: String,
+        workstream_name: String,
+    },
+    ShellList {
+        project_name: String,
+        workstream_name: String,
+    },
+    ShellDelete {
+        project_name: String,
+        workstream_name: String,
+        shell_id: String,
+    },
 }
 
 async fn run_cmd(conn: &mut Connection, cmd: DaemonCmd) -> Result<()> {
@@ -302,6 +407,19 @@ async fn run_cmd(conn: &mut Connection, cmd: DaemonCmd) -> Result<()> {
         DaemonCmd::WorkstreamDelete { project_name, name } => {
             run_workstream_delete(conn, project_name, name).await
         }
+        DaemonCmd::ShellCreate {
+            project_name,
+            workstream_name,
+        } => run_shell_create(conn, project_name, workstream_name).await,
+        DaemonCmd::ShellList {
+            project_name,
+            workstream_name,
+        } => run_shell_list(conn, project_name, workstream_name).await,
+        DaemonCmd::ShellDelete {
+            project_name,
+            workstream_name,
+            shell_id,
+        } => run_shell_delete(conn, project_name, workstream_name, shell_id).await,
     }
 }
 
@@ -463,6 +581,77 @@ async fn run_workstream_delete(
     let response: vex_proto::Response = conn.recv().await?;
     match response {
         vex_proto::Response::Ok => println!("Deleted workstream '{name}'."),
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn run_shell_create(
+    conn: &mut Connection,
+    project_name: String,
+    workstream_name: String,
+) -> Result<()> {
+    conn.send(&vex_proto::Command::ShellCreate {
+        project_name,
+        workstream_name,
+    })
+    .await?;
+    let response: vex_proto::Response = conn.recv().await?;
+    match response {
+        vex_proto::Response::Shell(s) => {
+            println!(
+                "Created shell '{}' in workstream '{}' (project '{}')",
+                s.id, s.workstream_name, s.project_name
+            );
+        }
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn run_shell_list(
+    conn: &mut Connection,
+    project_name: String,
+    workstream_name: String,
+) -> Result<()> {
+    conn.send(&vex_proto::Command::ShellList {
+        project_name,
+        workstream_name,
+    })
+    .await?;
+    let response: vex_proto::Response = conn.recv().await?;
+    match response {
+        vex_proto::Response::Shells(shells) => {
+            if shells.is_empty() {
+                println!("No shells.");
+            }
+            for s in &shells {
+                println!("{}", s.id);
+            }
+        }
+        vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn run_shell_delete(
+    conn: &mut Connection,
+    project_name: String,
+    workstream_name: String,
+    shell_id: String,
+) -> Result<()> {
+    conn.send(&vex_proto::Command::ShellDelete {
+        project_name,
+        workstream_name,
+        shell_id: shell_id.clone(),
+    })
+    .await?;
+    let response: vex_proto::Response = conn.recv().await?;
+    match response {
+        vex_proto::Response::Ok => println!("Deleted shell '{shell_id}'."),
         vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
         other => anyhow::bail!("Unexpected response: {other:?}"),
     }

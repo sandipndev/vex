@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
-# Workstream CRUD tests — local daemon (Unix socket) + TCP.
+# Shell management tests — tmux backend, local daemon + TCP access control.
 #
-# Requires: bats-core >= 1.9
-# Run:  bats tests/workstream.bats
+# Requires: bats-core >= 1.9, tmux
+# Run:  bats tests/shell.bats
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 VEXD_BIN="$REPO_ROOT/target/debug/vexd"
@@ -20,7 +20,7 @@ setup() {
     TEST_HOME=$(mktemp -d)
     export TEST_HOME
 
-    TCP_PORT=$((7700 + BATS_TEST_NUMBER * 2))
+    TCP_PORT=$((7800 + BATS_TEST_NUMBER * 2))
     HTTP_PORT=$((TCP_PORT + 1))
     export TCP_PORT HTTP_PORT
     export VEXD_TCP_PORT="$TCP_PORT"
@@ -81,103 +81,143 @@ register_project() {
 
 # ── Tests ─────────────────────────────────────────────────────────────────
 
-@test "workstream: create succeeds" {
+@test "shell: create succeeds" {
     register_project myproject
-
     vex connect
-    run vex workstream create myproject ws1
+    vex workstream create myproject ws1
+
+    run vex shell create myproject ws1
     [ "$status" -eq 0 ]
     [[ "$output" == *"Created"* ]]
-    [[ "$output" == *"ws1"* ]]
+    [[ "$output" == *"shell_1"* ]]
 }
 
-@test "workstream: list shows created workstream" {
+@test "shell: list shows created shells" {
     register_project myproject
-
     vex connect
     vex workstream create myproject ws1
-    vex workstream create myproject ws2
+    vex shell create myproject ws1
+    vex shell create myproject ws1
 
-    run vex workstream list myproject
+    run vex shell list myproject ws1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"ws1"* ]]
-    [[ "$output" == *"ws2"* ]]
+    [[ "$output" == *"shell_1"* ]]
+    [[ "$output" == *"shell_2"* ]]
 }
 
-@test "workstream: delete removes workstream" {
+@test "shell: delete removes shell" {
     register_project myproject
-
     vex connect
     vex workstream create myproject ws1
+    vex shell create myproject ws1
 
-    run vex workstream delete myproject ws1
+    run vex shell delete myproject ws1 shell_1
     [ "$status" -eq 0 ]
     [[ "$output" == *"Deleted"* ]]
 
-    run vex workstream list myproject
+    run vex shell list myproject ws1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"No workstreams"* ]]
+    [[ "$output" == *"No shells"* ]]
 }
 
-@test "workstream: create rejects duplicate name" {
+@test "shell: create fails for non-existent workstream" {
     register_project myproject
-
-    vex connect
-    vex workstream create myproject ws1
-
-    run vex workstream create myproject ws1
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"already exists"* ]]
-}
-
-@test "workstream: create fails for non-existent project" {
     vex connect
 
-    run vex workstream create nosuchproject ws1
+    run vex shell create myproject nosuchws
     [ "$status" -ne 0 ]
     [[ "$output" == *"not found"* ]]
 }
 
-@test "workstream: CRUD works over TCP" {
+@test "shell: delete fails for non-existent shell" {
     register_project myproject
+    vex connect
+    vex workstream create myproject ws1
 
-    local pairing
-    pairing=$(pair_token)
-    vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
-
-    run vex workstream create myproject ws1
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Created"* ]]
-
-    run vex workstream list myproject
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"ws1"* ]]
-
-    run vex workstream delete myproject ws1
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Deleted"* ]]
-
-    run vex workstream list myproject
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"No workstreams"* ]]
+    run vex shell delete myproject ws1 shell_99
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"NotFound"* ]]
 }
 
-@test "workstream: delete also kills shells and tmux session" {
+@test "shell: tmux session created on first shell" {
     register_project myproject
+    vex connect
+    vex workstream create myproject ws1
+    vex shell create myproject ws1
 
+    run tmux has-session -t vex_myproject_ws1
+    [ "$status" -eq 0 ]
+}
+
+@test "shell: tmux session destroyed on last shell delete" {
+    register_project myproject
+    vex connect
+    vex workstream create myproject ws1
+    vex shell create myproject ws1
+
+    vex shell delete myproject ws1 shell_1
+
+    run tmux has-session -t vex_myproject_ws1
+    [ "$status" -ne 0 ]
+}
+
+@test "shell: workstream delete kills all shells and tmux session" {
+    register_project myproject
     vex connect
     vex workstream create myproject ws1
     vex shell create myproject ws1
     vex shell create myproject ws1
 
-    # Verify tmux session exists
     run tmux has-session -t vex_myproject_ws1
     [ "$status" -eq 0 ]
 
-    # Delete the workstream
     vex workstream delete myproject ws1
 
-    # Tmux session should be gone
     run tmux has-session -t vex_myproject_ws1
     [ "$status" -ne 0 ]
+}
+
+@test "shell: bidirectional sync removes vanished tmux windows" {
+    register_project myproject
+    vex connect
+    vex workstream create myproject ws1
+    vex shell create myproject ws1
+
+    # Kill the tmux session directly (simulating user closing it)
+    tmux kill-session -t vex_myproject_ws1
+
+    # Wait for the monitor to reconcile (polls every 3s)
+    sleep 4
+
+    run vex shell list myproject ws1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No shells"* ]]
+}
+
+@test "shell: list works over TCP; create/delete rejected over TCP" {
+    register_project myproject
+    vex connect
+    vex workstream create myproject ws1
+
+    local pairing
+    pairing=$(pair_token)
+    vex_pipe "$pairing" connect -n remote --host "localhost:$TCP_PORT"
+
+    # Create a shell via local socket first
+    vex shell create myproject ws1
+
+    # List should work over TCP
+    run vex shell list myproject ws1 -c remote
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"shell_1"* ]]
+
+    # Create should be rejected over TCP
+    run vex shell create myproject ws1 -c remote
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"LocalOnly"* ]]
+
+    # Delete should be rejected over TCP
+    run vex shell delete myproject ws1 shell_1 -c remote
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"LocalOnly"* ]]
 }

@@ -5,6 +5,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use vex_proto::{Command, Response, Transport, VexProtoError};
 
 use crate::state::AppState;
+use crate::tmux;
 
 pub mod http;
 pub mod tcp;
@@ -148,7 +149,11 @@ pub async fn dispatch(
         Command::WorkstreamCreate { project_name, name } => {
             let mut store = state.project_store.lock().await;
             match store.create_workstream(&project_name, name.clone()) {
-                Ok(()) => Response::Workstream(vex_proto::WorkstreamInfo { name, project_name }),
+                Ok(()) => Response::Workstream(vex_proto::WorkstreamInfo {
+                    name,
+                    project_name,
+                    shell_count: 0,
+                }),
                 Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
             }
         }
@@ -157,11 +162,16 @@ pub async fn dispatch(
             let store = state.project_store.lock().await;
             match store.list_workstreams(&project_name) {
                 Ok(ws) => {
+                    let shell_store = state.shell_store.lock().await;
                     let items = ws
                         .iter()
-                        .map(|w| vex_proto::WorkstreamInfo {
-                            name: w.name.clone(),
-                            project_name: project_name.clone(),
+                        .map(|w| {
+                            let shell_count = shell_store.list(&project_name, &w.name).len() as u32;
+                            vex_proto::WorkstreamInfo {
+                                name: w.name.clone(),
+                                project_name: project_name.clone(),
+                                shell_count,
+                            }
                         })
                         .collect();
                     Response::Workstreams(items)
@@ -171,11 +181,137 @@ pub async fn dispatch(
         }
 
         Command::WorkstreamDelete { project_name, name } => {
+            // Clean up shells + tmux session before deleting workstream config
+            {
+                let mut shell_store = state.shell_store.lock().await;
+                shell_store.remove_all(&project_name, &name);
+            }
+            let session = tmux::session_name(&project_name, &name);
+            if tmux::has_session(&session) {
+                let _ = tmux::kill_session(&session);
+            }
+
             let mut store = state.project_store.lock().await;
             match store.delete_workstream(&project_name, &name) {
                 Ok(true) => Response::Ok,
                 Ok(false) => Response::Error(VexProtoError::NotFound),
                 Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
+            }
+        }
+
+        Command::ShellCreate {
+            project_name,
+            workstream_name,
+        } => {
+            if matches!(transport, Transport::Tcp) {
+                return Response::Error(VexProtoError::LocalOnly);
+            }
+
+            // Verify workstream exists and get shell program
+            let shell_cmd = {
+                let store = state.project_store.lock().await;
+                match store.list_workstreams(&project_name) {
+                    Ok(ws) if ws.iter().any(|w| w.name == workstream_name) => {
+                        store.config().defaults.shell.clone()
+                    }
+                    Ok(_) => {
+                        return Response::Error(VexProtoError::Internal(format!(
+                            "workstream '{workstream_name}' not found in project '{project_name}'"
+                        )));
+                    }
+                    Err(e) => {
+                        return Response::Error(VexProtoError::Internal(e.to_string()));
+                    }
+                }
+            };
+
+            let session = tmux::session_name(&project_name, &workstream_name);
+            let window_index = if tmux::has_session(&session) {
+                match tmux::new_window(&session, &shell_cmd) {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        return Response::Error(VexProtoError::Internal(e.to_string()));
+                    }
+                }
+            } else {
+                match tmux::new_session(&session, &shell_cmd) {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        return Response::Error(VexProtoError::Internal(e.to_string()));
+                    }
+                }
+            };
+
+            let mut shell_store = state.shell_store.lock().await;
+            let id = shell_store.add(&project_name, &workstream_name, window_index);
+
+            Response::Shell(vex_proto::ShellInfo {
+                id,
+                project_name,
+                workstream_name,
+            })
+        }
+
+        Command::ShellList {
+            project_name,
+            workstream_name,
+        } => {
+            // Verify workstream exists
+            {
+                let store = state.project_store.lock().await;
+                match store.list_workstreams(&project_name) {
+                    Ok(ws) if ws.iter().any(|w| w.name == workstream_name) => {}
+                    Ok(_) => {
+                        return Response::Error(VexProtoError::Internal(format!(
+                            "workstream '{workstream_name}' not found in project '{project_name}'"
+                        )));
+                    }
+                    Err(e) => {
+                        return Response::Error(VexProtoError::Internal(e.to_string()));
+                    }
+                }
+            }
+
+            let shell_store = state.shell_store.lock().await;
+            let shells: Vec<vex_proto::ShellInfo> = shell_store
+                .list(&project_name, &workstream_name)
+                .iter()
+                .map(|e| vex_proto::ShellInfo {
+                    id: e.id.clone(),
+                    project_name: project_name.clone(),
+                    workstream_name: workstream_name.clone(),
+                })
+                .collect();
+            Response::Shells(shells)
+        }
+
+        Command::ShellDelete {
+            project_name,
+            workstream_name,
+            shell_id,
+        } => {
+            if matches!(transport, Transport::Tcp) {
+                return Response::Error(VexProtoError::LocalOnly);
+            }
+
+            let (removed, has_remaining) = {
+                let mut shell_store = state.shell_store.lock().await;
+                let removed = shell_store.remove(&project_name, &workstream_name, &shell_id);
+                let has_remaining = shell_store.has_shells(&project_name, &workstream_name);
+                (removed, has_remaining)
+            };
+
+            match removed {
+                Some(entry) => {
+                    let session = tmux::session_name(&project_name, &workstream_name);
+                    if has_remaining {
+                        let _ = tmux::kill_window(&session, entry.tmux_window_index);
+                    } else {
+                        let _ = tmux::kill_session(&session);
+                    }
+                    Response::Ok
+                }
+                None => Response::Error(VexProtoError::NotFound),
             }
         }
     }

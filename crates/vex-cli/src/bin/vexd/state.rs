@@ -10,12 +10,14 @@ use tokio::sync::Mutex;
 
 use crate::auth::TokenStore;
 use crate::project::ProjectStore;
+use crate::shell::ShellStore;
 
 pub struct AppState {
     pub start_time: Instant,
     pub client_counter: AtomicU32,
     pub token_store: Arc<Mutex<TokenStore>>,
     pub project_store: Arc<Mutex<ProjectStore>>,
+    pub shell_store: Arc<Mutex<ShellStore>>,
     pub vexd_dir: PathBuf,
 }
 
@@ -30,6 +32,7 @@ impl AppState {
             client_counter: AtomicU32::new(0),
             token_store: Arc::new(Mutex::new(token_store)),
             project_store: Arc::new(Mutex::new(project_store)),
+            shell_store: Arc::new(Mutex::new(ShellStore::new())),
             vexd_dir,
         })
     }

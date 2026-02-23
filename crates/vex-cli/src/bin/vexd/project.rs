@@ -31,16 +31,23 @@ impl Default for PortsConfig {
 pub struct DefaultsConfig {
     #[serde(default = "default_runtime")]
     pub runtime: String,
+    #[serde(default = "default_shell")]
+    pub shell: String,
 }
 
 fn default_runtime() -> String {
     "tmux".to_string()
 }
 
+fn default_shell() -> String {
+    "zsh".to_string()
+}
+
 impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
             runtime: default_runtime(),
+            shell: default_shell(),
         }
     }
 }
