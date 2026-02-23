@@ -16,7 +16,10 @@ export type Command =
   | { type: "ProjectList" }
   | { type: "WorkstreamCreate"; data: { project_name: string; name: string } }
   | { type: "WorkstreamList"; data: { project_name: string } }
-  | { type: "WorkstreamDelete"; data: { project_name: string; name: string } };
+  | { type: "WorkstreamDelete"; data: { project_name: string; name: string } }
+  | { type: "ShellCreate"; data: { project_name: string; workstream_name: string } }
+  | { type: "ShellList"; data: { project_name: string; workstream_name: string } }
+  | { type: "ShellDelete"; data: { project_name: string; workstream_name: string; shell_id: string } };
 
 export type Response =
   | { type: "Pong" }
@@ -31,6 +34,8 @@ export type Response =
   | { type: "Projects"; data: ProjectInfo[] }
   | { type: "Workstream"; data: WorkstreamInfo }
   | { type: "Workstreams"; data: WorkstreamInfo[] }
+  | { type: "Shell"; data: ShellInfo }
+  | { type: "Shells"; data: ShellInfo[] }
   | { type: "Error"; data: VexProtoError };
 
 export interface DaemonStatus {
@@ -62,6 +67,13 @@ export interface ProjectInfo {
 export interface WorkstreamInfo {
   name: string;
   project_name: string;
+  shell_count: number;
+}
+
+export interface ShellInfo {
+  id: string;
+  project_name: string;
+  workstream_name: string;
 }
 
 export interface ClientInfo {

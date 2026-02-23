@@ -43,12 +43,33 @@ pub enum Command {
         project_name: String,
         name: String,
     },
+    ShellCreate {
+        project_name: String,
+        workstream_name: String,
+    },
+    ShellList {
+        project_name: String,
+        workstream_name: String,
+    },
+    ShellDelete {
+        project_name: String,
+        workstream_name: String,
+        shell_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkstreamInfo {
     pub name: String,
     pub project_name: String,
+    pub shell_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellInfo {
+    pub id: String,
+    pub project_name: String,
+    pub workstream_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +89,8 @@ pub enum Response {
     Projects(Vec<ProjectInfo>),
     Workstream(WorkstreamInfo),
     Workstreams(Vec<WorkstreamInfo>),
+    Shell(ShellInfo),
+    Shells(Vec<ShellInfo>),
     Error(VexProtoError),
 }
 
