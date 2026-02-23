@@ -31,6 +31,23 @@ pub enum Command {
         name: String,
     },
     RepoList,
+    WorkstreamCreate {
+        repo_name: String,
+        name: String,
+    },
+    WorkstreamList {
+        repo_name: String,
+    },
+    WorkstreamDelete {
+        repo_name: String,
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkstreamInfo {
+    pub name: String,
+    pub repo_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +65,8 @@ pub enum Response {
     Revoked(u32),
     Repo(RepoInfo),
     Repos(Vec<RepoInfo>),
+    Workstream(WorkstreamInfo),
+    Workstreams(Vec<WorkstreamInfo>),
     Error(VexProtoError),
 }
 
