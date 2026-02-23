@@ -104,25 +104,26 @@ pub async fn dispatch(
             Response::Revoked(count as u32)
         }
 
-        Command::RepoRegister { name, path } => {
+        Command::ProjectRegister { name, repo, path } => {
             if matches!(transport, Transport::Tcp) {
                 return Response::Error(VexProtoError::LocalOnly);
             }
-            let mut store = state.repo_store.lock().await;
-            match store.register(name, path) {
-                Ok(entry) => Response::Repo(vex_proto::RepoInfo {
-                    name: entry.name,
+            let mut store = state.project_store.lock().await;
+            match store.register(name.clone(), repo, path) {
+                Ok(entry) => Response::Project(vex_proto::ProjectInfo {
+                    name,
+                    repo: entry.repo,
                     path: entry.path,
                 }),
                 Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
             }
         }
 
-        Command::RepoUnregister { name } => {
+        Command::ProjectUnregister { name } => {
             if matches!(transport, Transport::Tcp) {
                 return Response::Error(VexProtoError::LocalOnly);
             }
-            let mut store = state.repo_store.lock().await;
+            let mut store = state.project_store.lock().await;
             if store.unregister(&name) {
                 Response::Ok
             } else {
@@ -130,36 +131,37 @@ pub async fn dispatch(
             }
         }
 
-        Command::RepoList => {
-            let store = state.repo_store.lock().await;
-            let repos = store
+        Command::ProjectList => {
+            let store = state.project_store.lock().await;
+            let projects = store
                 .list()
                 .iter()
-                .map(|r| vex_proto::RepoInfo {
-                    name: r.name.clone(),
-                    path: r.path.clone(),
+                .map(|(name, cfg)| vex_proto::ProjectInfo {
+                    name: name.clone(),
+                    repo: cfg.repo.clone(),
+                    path: cfg.path.clone(),
                 })
                 .collect();
-            Response::Repos(repos)
+            Response::Projects(projects)
         }
 
-        Command::WorkstreamCreate { repo_name, name } => {
-            let mut store = state.repo_store.lock().await;
-            match store.create_workstream(&repo_name, name.clone()) {
-                Ok(()) => Response::Workstream(vex_proto::WorkstreamInfo { name, repo_name }),
+        Command::WorkstreamCreate { project_name, name } => {
+            let mut store = state.project_store.lock().await;
+            match store.create_workstream(&project_name, name.clone()) {
+                Ok(()) => Response::Workstream(vex_proto::WorkstreamInfo { name, project_name }),
                 Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
             }
         }
 
-        Command::WorkstreamList { repo_name } => {
-            let store = state.repo_store.lock().await;
-            match store.list_workstreams(&repo_name) {
+        Command::WorkstreamList { project_name } => {
+            let store = state.project_store.lock().await;
+            match store.list_workstreams(&project_name) {
                 Ok(ws) => {
                     let items = ws
                         .iter()
                         .map(|w| vex_proto::WorkstreamInfo {
                             name: w.name.clone(),
-                            repo_name: repo_name.clone(),
+                            project_name: project_name.clone(),
                         })
                         .collect();
                     Response::Workstreams(items)
@@ -168,9 +170,9 @@ pub async fn dispatch(
             }
         }
 
-        Command::WorkstreamDelete { repo_name, name } => {
-            let mut store = state.repo_store.lock().await;
-            match store.delete_workstream(&repo_name, &name) {
+        Command::WorkstreamDelete { project_name, name } => {
+            let mut store = state.project_store.lock().await;
+            match store.delete_workstream(&project_name, &name) {
                 Ok(true) => Response::Ok,
                 Ok(false) => Response::Error(VexProtoError::NotFound),
                 Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),

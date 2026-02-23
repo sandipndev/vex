@@ -2,7 +2,7 @@ use vex_cli as vex_proto;
 
 mod auth;
 mod local;
-mod repo;
+mod project;
 mod server;
 mod state;
 
@@ -45,10 +45,10 @@ enum Commands {
         #[command(subcommand)]
         action: TokensCmd,
     },
-    /// Manage registered repositories
-    Repo {
+    /// Manage registered projects
+    Project {
         #[command(subcommand)]
-        action: RepoCmd,
+        action: ProjectCmd,
     },
     /// Print shell completion script
     Completions {
@@ -89,20 +89,22 @@ enum TokensCmd {
 }
 
 #[derive(Subcommand)]
-enum RepoCmd {
-    /// Register a local repository
+enum ProjectCmd {
+    /// Register a local project
     Register {
-        /// Name for this repository
+        /// Name for this project
         name: String,
-        /// Path to the repository directory
+        /// Repository identifier (e.g. owner/repo)
+        repo: String,
+        /// Path to the project directory
         path: String,
     },
-    /// Unregister a repository by name
+    /// Unregister a project by name
     Unregister {
-        /// Repository name to remove
+        /// Project name to remove
         name: String,
     },
-    /// List all registered repositories
+    /// List all registered projects
     List,
 }
 
@@ -110,7 +112,7 @@ enum RepoCmd {
 
 fn vexd_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("cannot determine home directory")?;
-    Ok(home.join(".vexd"))
+    Ok(home.join(".vex"))
 }
 
 fn admin_socket_path() -> Result<PathBuf> {
@@ -187,38 +189,39 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Commands::Repo { action } => tokio::runtime::Runtime::new()?.block_on(async {
+        Commands::Project { action } => tokio::runtime::Runtime::new()?.block_on(async {
             let sock = admin_socket_path()?;
             match action {
-                RepoCmd::Register { name, path } => {
-                    let cmd = vex_proto::Command::RepoRegister {
+                ProjectCmd::Register { name, repo, path } => {
+                    let cmd = vex_proto::Command::ProjectRegister {
                         name: name.clone(),
+                        repo: repo.clone(),
                         path: path.clone(),
                     };
                     match local::send_command(&sock, &cmd).await? {
-                        vex_proto::Response::Repo(r) => {
-                            println!("Registered '{}' → {}", r.name, r.path);
+                        vex_proto::Response::Project(p) => {
+                            println!("Registered project '{}' ({}) → {}", p.name, p.repo, p.path);
                         }
                         vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
                         other => anyhow::bail!("Unexpected response: {other:?}"),
                     }
                 }
-                RepoCmd::Unregister { name } => {
-                    let cmd = vex_proto::Command::RepoUnregister { name: name.clone() };
+                ProjectCmd::Unregister { name } => {
+                    let cmd = vex_proto::Command::ProjectUnregister { name: name.clone() };
                     match local::send_command(&sock, &cmd).await? {
                         vex_proto::Response::Ok => println!("Unregistered '{name}'."),
                         vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
                         other => anyhow::bail!("Unexpected response: {other:?}"),
                     }
                 }
-                RepoCmd::List => {
-                    match local::send_command(&sock, &vex_proto::Command::RepoList).await? {
-                        vex_proto::Response::Repos(repos) => {
-                            if repos.is_empty() {
-                                println!("No registered repositories.");
+                ProjectCmd::List => {
+                    match local::send_command(&sock, &vex_proto::Command::ProjectList).await? {
+                        vex_proto::Response::Projects(projects) => {
+                            if projects.is_empty() {
+                                println!("No registered projects.");
                             }
-                            for r in &repos {
-                                println!("{:<20} {}", r.name, r.path);
+                            for p in &projects {
+                                println!("{:<20} {:<30} {}", p.name, p.repo, p.path);
                             }
                         }
                         other => println!("{other:?}"),
@@ -321,21 +324,24 @@ async fn run_daemon(vexd_dir: PathBuf) -> Result<()> {
         .init();
 
     let token_store = auth::TokenStore::load(vexd_dir.join("tokens.json"))?;
-    let repo_store = repo::RepoStore::load(vexd_dir.join("repos.json"))?;
-    let state = state::AppState::new(vexd_dir.clone(), token_store, repo_store);
+    let project_store = project::ProjectStore::load(vexd_dir.join("config.yml"))?;
 
-    let socket_path = state.socket_path();
+    let config = project_store.config();
     let tcp_port: u16 = std::env::var("VEXD_TCP_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(vex_proto::DEFAULT_TCP_PORT);
-    let tcp_addr: SocketAddr = format!("0.0.0.0:{tcp_port}")
-        .parse()
-        .context("invalid TCP address")?;
+        .unwrap_or(config.ports.rpc);
     let http_port: u16 = std::env::var("VEXD_HTTP_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(tcp_port + 1);
+
+    let state = state::AppState::new(vexd_dir.clone(), token_store, project_store);
+
+    let socket_path = state.socket_path();
+    let tcp_addr: SocketAddr = format!("0.0.0.0:{tcp_port}")
+        .parse()
+        .context("invalid TCP address")?;
     let http_addr: SocketAddr = format!("0.0.0.0:{http_port}")
         .parse()
         .context("invalid HTTP address")?;

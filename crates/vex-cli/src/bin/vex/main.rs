@@ -38,9 +38,9 @@ enum Commands {
     Status(ConnectionFlag),
     /// Show who you are connected as
     Whoami(ConnectionFlag),
-    /// List registered repositories
-    Repos(ConnectionFlag),
-    /// Manage workstreams under a repository
+    /// List registered projects
+    Projects(ConnectionFlag),
+    /// Manage workstreams under a project
     Workstream {
         #[command(subcommand)]
         action: WorkstreamCmd,
@@ -77,26 +77,26 @@ struct ConnectionFlag {
 
 #[derive(Subcommand)]
 enum WorkstreamCmd {
-    /// Create a new workstream under a repository
+    /// Create a new workstream under a project
     Create {
-        /// Repository name
-        repo_name: String,
+        /// Project name
+        project_name: String,
         /// Workstream name
         name: String,
         #[command(flatten)]
         conn: ConnectionFlag,
     },
-    /// List workstreams for a repository
+    /// List workstreams for a project
     List {
-        /// Repository name
-        repo_name: String,
+        /// Project name
+        project_name: String,
         #[command(flatten)]
         conn: ConnectionFlag,
     },
     /// Delete a workstream by name
     Delete {
-        /// Repository name
-        repo_name: String,
+        /// Project name
+        project_name: String,
         /// Workstream name
         name: String,
         #[command(flatten)]
@@ -121,21 +121,25 @@ async fn main() -> Result<()> {
         Commands::List => cmd_list(),
         Commands::Status(flag) => cmd_with_connections(flag, DaemonCmd::Status).await,
         Commands::Whoami(flag) => cmd_with_connections(flag, DaemonCmd::Whoami).await,
-        Commands::Repos(flag) => cmd_with_connections(flag, DaemonCmd::Repos).await,
+        Commands::Projects(flag) => cmd_with_connections(flag, DaemonCmd::Projects).await,
         Commands::Workstream { action } => match action {
             WorkstreamCmd::Create {
-                repo_name,
+                project_name,
                 name,
                 conn,
-            } => cmd_with_connections(conn, DaemonCmd::WorkstreamCreate { repo_name, name }).await,
-            WorkstreamCmd::List { repo_name, conn } => {
-                cmd_with_connections(conn, DaemonCmd::WorkstreamList { repo_name }).await
+            } => {
+                cmd_with_connections(conn, DaemonCmd::WorkstreamCreate { project_name, name }).await
+            }
+            WorkstreamCmd::List { project_name, conn } => {
+                cmd_with_connections(conn, DaemonCmd::WorkstreamList { project_name }).await
             }
             WorkstreamCmd::Delete {
-                repo_name,
+                project_name,
                 name,
                 conn,
-            } => cmd_with_connections(conn, DaemonCmd::WorkstreamDelete { repo_name, name }).await,
+            } => {
+                cmd_with_connections(conn, DaemonCmd::WorkstreamDelete { project_name, name }).await
+            }
         },
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
@@ -266,7 +270,7 @@ fn cmd_list() -> Result<()> {
             _ => entry
                 .unix_socket
                 .as_deref()
-                .unwrap_or("~/.vexd/vexd.sock")
+                .unwrap_or("~/.vex/vexd.sock")
                 .to_string(),
         };
         println!("{marker} {name:<20} {} → {target}", entry.transport);
@@ -280,23 +284,23 @@ fn cmd_list() -> Result<()> {
 enum DaemonCmd {
     Status,
     Whoami,
-    Repos,
-    WorkstreamCreate { repo_name: String, name: String },
-    WorkstreamList { repo_name: String },
-    WorkstreamDelete { repo_name: String, name: String },
+    Projects,
+    WorkstreamCreate { project_name: String, name: String },
+    WorkstreamList { project_name: String },
+    WorkstreamDelete { project_name: String, name: String },
 }
 
 async fn run_cmd(conn: &mut Connection, cmd: DaemonCmd) -> Result<()> {
     match cmd {
         DaemonCmd::Status => run_status(conn).await,
         DaemonCmd::Whoami => run_whoami(conn).await,
-        DaemonCmd::Repos => run_repos(conn).await,
-        DaemonCmd::WorkstreamCreate { repo_name, name } => {
-            run_workstream_create(conn, repo_name, name).await
+        DaemonCmd::Projects => run_projects(conn).await,
+        DaemonCmd::WorkstreamCreate { project_name, name } => {
+            run_workstream_create(conn, project_name, name).await
         }
-        DaemonCmd::WorkstreamList { repo_name } => run_workstream_list(conn, repo_name).await,
-        DaemonCmd::WorkstreamDelete { repo_name, name } => {
-            run_workstream_delete(conn, repo_name, name).await
+        DaemonCmd::WorkstreamList { project_name } => run_workstream_list(conn, project_name).await,
+        DaemonCmd::WorkstreamDelete { project_name, name } => {
+            run_workstream_delete(conn, project_name, name).await
         }
     }
 }
@@ -389,16 +393,16 @@ async fn run_whoami(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-async fn run_repos(conn: &mut Connection) -> Result<()> {
-    conn.send(&vex_proto::Command::RepoList).await?;
+async fn run_projects(conn: &mut Connection) -> Result<()> {
+    conn.send(&vex_proto::Command::ProjectList).await?;
     let response: vex_proto::Response = conn.recv().await?;
     match response {
-        vex_proto::Response::Repos(repos) => {
-            if repos.is_empty() {
-                println!("No registered repositories.");
+        vex_proto::Response::Projects(projects) => {
+            if projects.is_empty() {
+                println!("No registered projects.");
             }
-            for r in &repos {
-                println!("{:<20} {}", r.name, r.path);
+            for p in &projects {
+                println!("{:<20} {:<30} {}", p.name, p.repo, p.path);
             }
         }
         other => println!("{other:?}"),
@@ -408,17 +412,17 @@ async fn run_repos(conn: &mut Connection) -> Result<()> {
 
 async fn run_workstream_create(
     conn: &mut Connection,
-    repo_name: String,
+    project_name: String,
     name: String,
 ) -> Result<()> {
-    conn.send(&vex_proto::Command::WorkstreamCreate { repo_name, name })
+    conn.send(&vex_proto::Command::WorkstreamCreate { project_name, name })
         .await?;
     let response: vex_proto::Response = conn.recv().await?;
     match response {
         vex_proto::Response::Workstream(ws) => {
             println!(
-                "Created workstream '{}' in repo '{}'",
-                ws.name, ws.repo_name
+                "Created workstream '{}' in project '{}'",
+                ws.name, ws.project_name
             );
         }
         vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
@@ -427,8 +431,8 @@ async fn run_workstream_create(
     Ok(())
 }
 
-async fn run_workstream_list(conn: &mut Connection, repo_name: String) -> Result<()> {
-    conn.send(&vex_proto::Command::WorkstreamList { repo_name })
+async fn run_workstream_list(conn: &mut Connection, project_name: String) -> Result<()> {
+    conn.send(&vex_proto::Command::WorkstreamList { project_name })
         .await?;
     let response: vex_proto::Response = conn.recv().await?;
     match response {
@@ -448,11 +452,11 @@ async fn run_workstream_list(conn: &mut Connection, repo_name: String) -> Result
 
 async fn run_workstream_delete(
     conn: &mut Connection,
-    repo_name: String,
+    project_name: String,
     name: String,
 ) -> Result<()> {
     conn.send(&vex_proto::Command::WorkstreamDelete {
-        repo_name,
+        project_name,
         name: name.clone(),
     })
     .await?;
@@ -469,7 +473,7 @@ async fn run_workstream_delete(
 
 fn default_socket_path() -> String {
     dirs::home_dir()
-        .map(|h| h.join(".vexd").join("vexd.sock"))
+        .map(|h| h.join(".vex").join("vexd.sock"))
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "/tmp/vexd.sock".to_string())
 }
