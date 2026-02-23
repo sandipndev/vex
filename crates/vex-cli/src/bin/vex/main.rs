@@ -127,13 +127,7 @@ async fn main() -> Result<()> {
                 repo_name,
                 name,
                 conn,
-            } => {
-                cmd_with_connections(
-                    conn,
-                    DaemonCmd::WorkstreamCreate { repo_name, name },
-                )
-                .await
-            }
+            } => cmd_with_connections(conn, DaemonCmd::WorkstreamCreate { repo_name, name }).await,
             WorkstreamCmd::List { repo_name, conn } => {
                 cmd_with_connections(conn, DaemonCmd::WorkstreamList { repo_name }).await
             }
@@ -141,13 +135,7 @@ async fn main() -> Result<()> {
                 repo_name,
                 name,
                 conn,
-            } => {
-                cmd_with_connections(
-                    conn,
-                    DaemonCmd::WorkstreamDelete { repo_name, name },
-                )
-                .await
-            }
+            } => cmd_with_connections(conn, DaemonCmd::WorkstreamDelete { repo_name, name }).await,
         },
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "vex", &mut std::io::stdout());
@@ -423,15 +411,15 @@ async fn run_workstream_create(
     repo_name: String,
     name: String,
 ) -> Result<()> {
-    conn.send(&vex_proto::Command::WorkstreamCreate {
-        repo_name,
-        name,
-    })
-    .await?;
+    conn.send(&vex_proto::Command::WorkstreamCreate { repo_name, name })
+        .await?;
     let response: vex_proto::Response = conn.recv().await?;
     match response {
         vex_proto::Response::Workstream(ws) => {
-            println!("Created workstream '{}' in repo '{}'", ws.name, ws.repo_name);
+            println!(
+                "Created workstream '{}' in repo '{}'",
+                ws.name, ws.repo_name
+            );
         }
         vex_proto::Response::Error(e) => anyhow::bail!("{e:?}"),
         other => anyhow::bail!("Unexpected response: {other:?}"),

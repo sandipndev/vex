@@ -146,10 +146,7 @@ pub async fn dispatch(
         Command::WorkstreamCreate { repo_name, name } => {
             let mut store = state.repo_store.lock().await;
             match store.create_workstream(&repo_name, name.clone()) {
-                Ok(()) => Response::Workstream(vex_proto::WorkstreamInfo {
-                    name,
-                    repo_name,
-                }),
+                Ok(()) => Response::Workstream(vex_proto::WorkstreamInfo { name, repo_name }),
                 Err(e) => Response::Error(VexProtoError::Internal(e.to_string())),
             }
         }
