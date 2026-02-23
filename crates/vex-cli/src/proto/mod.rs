@@ -23,23 +23,24 @@ pub enum Command {
         id: String,
     },
     PairRevokeAll,
-    RepoRegister {
+    ProjectRegister {
         name: String,
+        repo: String,
         path: String,
     },
-    RepoUnregister {
+    ProjectUnregister {
         name: String,
     },
-    RepoList,
+    ProjectList,
     WorkstreamCreate {
-        repo_name: String,
+        project_name: String,
         name: String,
     },
     WorkstreamList {
-        repo_name: String,
+        project_name: String,
     },
     WorkstreamDelete {
-        repo_name: String,
+        project_name: String,
         name: String,
     },
 }
@@ -47,7 +48,7 @@ pub enum Command {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkstreamInfo {
     pub name: String,
-    pub repo_name: String,
+    pub project_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,8 +64,8 @@ pub enum Response {
     PairedClients(Vec<PairedClient>),
     /// Returned by PairRevoke / PairRevokeAll, carrying the revoked count.
     Revoked(u32),
-    Repo(RepoInfo),
-    Repos(Vec<RepoInfo>),
+    Project(ProjectInfo),
+    Projects(Vec<ProjectInfo>),
     Workstream(WorkstreamInfo),
     Workstreams(Vec<WorkstreamInfo>),
     Error(VexProtoError),
@@ -103,8 +104,9 @@ pub struct PairedClient {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepoInfo {
+pub struct ProjectInfo {
     pub name: String,
+    pub repo: String,
     pub path: String,
 }
 

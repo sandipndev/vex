@@ -29,7 +29,7 @@ setup() {
     VEXD_PID=$!
     export VEXD_PID
 
-    local sock="$TEST_HOME/.vexd/vexd.sock"
+    local sock="$TEST_HOME/.vex/vexd.sock"
     local i=0
     while (( i < 50 )); do
         if [[ -S "$sock" ]] \
@@ -65,92 +65,92 @@ pair_token() {
     vexd pair "$@" | grep -oE 'tok_[a-f0-9]+:[a-f0-9]+'
 }
 
-register_repo() {
+register_project() {
     local tmpdir
     tmpdir=$(mktemp -d)
-    vexd repo register "$1" "$tmpdir"
+    vexd project register "$1" "owner/$1" "$tmpdir"
     echo "$tmpdir"
 }
 
 # ── Tests ─────────────────────────────────────────────────────────────────
 
 @test "workstream: create succeeds" {
-    register_repo myrepo
+    register_project myproject
 
     vex connect
-    run vex workstream create myrepo ws1
+    run vex workstream create myproject ws1
     [ "$status" -eq 0 ]
     [[ "$output" == *"Created"* ]]
     [[ "$output" == *"ws1"* ]]
 }
 
 @test "workstream: list shows created workstream" {
-    register_repo myrepo
+    register_project myproject
 
     vex connect
-    vex workstream create myrepo ws1
-    vex workstream create myrepo ws2
+    vex workstream create myproject ws1
+    vex workstream create myproject ws2
 
-    run vex workstream list myrepo
+    run vex workstream list myproject
     [ "$status" -eq 0 ]
     [[ "$output" == *"ws1"* ]]
     [[ "$output" == *"ws2"* ]]
 }
 
 @test "workstream: delete removes workstream" {
-    register_repo myrepo
+    register_project myproject
 
     vex connect
-    vex workstream create myrepo ws1
+    vex workstream create myproject ws1
 
-    run vex workstream delete myrepo ws1
+    run vex workstream delete myproject ws1
     [ "$status" -eq 0 ]
     [[ "$output" == *"Deleted"* ]]
 
-    run vex workstream list myrepo
+    run vex workstream list myproject
     [ "$status" -eq 0 ]
     [[ "$output" == *"No workstreams"* ]]
 }
 
 @test "workstream: create rejects duplicate name" {
-    register_repo myrepo
+    register_project myproject
 
     vex connect
-    vex workstream create myrepo ws1
+    vex workstream create myproject ws1
 
-    run vex workstream create myrepo ws1
+    run vex workstream create myproject ws1
     [ "$status" -ne 0 ]
     [[ "$output" == *"already exists"* ]]
 }
 
-@test "workstream: create fails for non-existent repo" {
+@test "workstream: create fails for non-existent project" {
     vex connect
 
-    run vex workstream create nosuchrepo ws1
+    run vex workstream create nosuchproject ws1
     [ "$status" -ne 0 ]
     [[ "$output" == *"not found"* ]]
 }
 
 @test "workstream: CRUD works over TCP" {
-    register_repo myrepo
+    register_project myproject
 
     local pairing
     pairing=$(pair_token)
     vex_pipe "$pairing" connect --host "localhost:$TCP_PORT"
 
-    run vex workstream create myrepo ws1
+    run vex workstream create myproject ws1
     [ "$status" -eq 0 ]
     [[ "$output" == *"Created"* ]]
 
-    run vex workstream list myrepo
+    run vex workstream list myproject
     [ "$status" -eq 0 ]
     [[ "$output" == *"ws1"* ]]
 
-    run vex workstream delete myrepo ws1
+    run vex workstream delete myproject ws1
     [ "$status" -eq 0 ]
     [[ "$output" == *"Deleted"* ]]
 
-    run vex workstream list myrepo
+    run vex workstream list myproject
     [ "$status" -eq 0 ]
     [[ "$output" == *"No workstreams"* ]]
 }

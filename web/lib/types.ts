@@ -11,12 +11,12 @@ export type Command =
   | { type: "PairList" }
   | { type: "PairRevoke"; data: { id: string } }
   | { type: "PairRevokeAll" }
-  | { type: "RepoRegister"; data: { name: string; path: string } }
-  | { type: "RepoUnregister"; data: { name: string } }
-  | { type: "RepoList" }
-  | { type: "WorkstreamCreate"; data: { repo_name: string; name: string } }
-  | { type: "WorkstreamList"; data: { repo_name: string } }
-  | { type: "WorkstreamDelete"; data: { repo_name: string; name: string } };
+  | { type: "ProjectRegister"; data: { name: string; repo: string; path: string } }
+  | { type: "ProjectUnregister"; data: { name: string } }
+  | { type: "ProjectList" }
+  | { type: "WorkstreamCreate"; data: { project_name: string; name: string } }
+  | { type: "WorkstreamList"; data: { project_name: string } }
+  | { type: "WorkstreamDelete"; data: { project_name: string; name: string } };
 
 export type Response =
   | { type: "Pong" }
@@ -27,8 +27,8 @@ export type Response =
   | { type: "PairedClient"; data: PairedClient }
   | { type: "PairedClients"; data: PairedClient[] }
   | { type: "Revoked"; data: number }
-  | { type: "Repo"; data: RepoInfo }
-  | { type: "Repos"; data: RepoInfo[] }
+  | { type: "Project"; data: ProjectInfo }
+  | { type: "Projects"; data: ProjectInfo[] }
   | { type: "Workstream"; data: WorkstreamInfo }
   | { type: "Workstreams"; data: WorkstreamInfo[] }
   | { type: "Error"; data: VexProtoError };
@@ -53,14 +53,15 @@ export interface PairedClient {
   last_seen?: string;
 }
 
-export interface RepoInfo {
+export interface ProjectInfo {
   name: string;
+  repo: string;
   path: string;
 }
 
 export interface WorkstreamInfo {
   name: string;
-  repo_name: string;
+  project_name: string;
 }
 
 export interface ClientInfo {
