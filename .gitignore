@@ -1,0 +1,12 @@
+target/
+
+**/*.rs.bk
+*.pdb
+
+.direnv/
+.env
+
+result
+.DS_Store
+
+.claude/settings.local.json

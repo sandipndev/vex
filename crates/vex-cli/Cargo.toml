@@ -1,0 +1,17 @@
+[package]
+name = "vex-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vex"
+path = "src/bin/vex/main.rs"
+
+[[bin]]
+name = "vexd"
+path = "src/bin/vexd/main.rs"
+
+[dependencies]
