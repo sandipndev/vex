@@ -1,0 +1,343 @@
+#!/usr/bin/env bats
+
+# ── file-level: build binaries once ──────────────────────────────────
+
+setup_file() {
+    cd "$BATS_TEST_DIRNAME/.."
+    cargo build --quiet
+}
+
+# ── per-test: isolated vexd instance ─────────────────────────────────
+
+setup() {
+    VEX="$BATS_TEST_DIRNAME/../target/debug/vex"
+    VEXD="$BATS_TEST_DIRNAME/../target/debug/vexd"
+
+    TEST_TMPDIR="$(mktemp -d)"
+    export VEX_SOCKET="$TEST_TMPDIR/vexd.sock"
+
+    "$VEXD" &
+    VEXD_PID=$!
+
+    local i
+    for i in $(seq 1 50); do
+        [ -S "$VEX_SOCKET" ] && return 0
+        sleep 0.1
+    done
+    echo "vexd failed to start within 5s" >&2
+    return 1
+}
+
+teardown() {
+    if [ -n "${VEXD_PID:-}" ]; then
+        kill "$VEXD_PID" 2>/dev/null || true
+        wait "$VEXD_PID" 2>/dev/null || true
+    fi
+    [ -n "${TEST_TMPDIR:-}" ] && rm -rf "$TEST_TMPDIR"
+}
+
+# ── helpers ──────────────────────────────────────────────────────────
+
+UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+# Merge stderr so error messages from anyhow are captured in $output
+vex() { "$VEX" "$@" 2>&1; }
+
+# Poll until session list matches expected pattern (max ~5s)
+wait_for_no_sessions() {
+    local i
+    for i in $(seq 1 20); do
+        result=$("$VEX" session list 2>&1)
+        [[ "$result" == *"no active sessions"* ]] && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+# Attach to a session inside a PTY (via script(1)), feeding stdin from a
+# subshell.  script may linger after the vex process exits because the pipe
+# keeps its stdin open, so we tolerate a timeout exit code.
+attach_via_pty() {
+    local sid="$1"; shift
+    # Remaining args are eval'd in a subshell that feeds stdin
+    ( eval "$@" ) | timeout 5 script -qec "$VEX session attach $sid" /dev/null 2>&1 || true
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Daemon lifecycle
+# ═══════════════════════════════════════════════════════════════════
+
+@test "vexd creates socket file on startup" {
+    [ -S "$VEX_SOCKET" ]
+}
+
+@test "vexd removes socket on SIGTERM" {
+    [ -S "$VEX_SOCKET" ]
+    kill "$VEXD_PID"
+    wait "$VEXD_PID" 2>/dev/null || true
+    VEXD_PID=""
+    sleep 0.2
+    [ ! -e "$VEX_SOCKET" ]
+}
+
+@test "vexd removes socket on SIGINT" {
+    [ -S "$VEX_SOCKET" ]
+    kill -INT "$VEXD_PID"
+    wait "$VEXD_PID" 2>/dev/null || true
+    VEXD_PID=""
+    sleep 0.2
+    [ ! -e "$VEX_SOCKET" ]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Session create
+# ═══════════════════════════════════════════════════════════════════
+
+@test "session create returns a valid UUID" {
+    run "$VEX" session create
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ $UUID_RE ]]
+}
+
+@test "session create with --shell flag" {
+    run "$VEX" session create --shell /bin/sh
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ $UUID_RE ]]
+}
+
+@test "session create returns unique IDs" {
+    run "$VEX" session create
+    ID1="$output"
+    run "$VEX" session create
+    ID2="$output"
+    [ "$ID1" != "$ID2" ]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Session list
+# ═══════════════════════════════════════════════════════════════════
+
+@test "session list: no sessions" {
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no active sessions"* ]]
+}
+
+@test "session list: header and session row" {
+    run "$VEX" session create
+    SID="$output"
+
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ID"* ]]
+    [[ "$output" == *"COLS"* ]]
+    [[ "$output" == *"ROWS"* ]]
+    [[ "$output" == *"CREATED"* ]]
+    [[ "$output" == *"$SID"* ]]
+}
+
+@test "session list: multiple sessions" {
+    run "$VEX" session create
+    SID1="$output"
+    run "$VEX" session create
+    SID2="$output"
+
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$SID1"* ]]
+    [[ "$output" == *"$SID2"* ]]
+}
+
+@test "session list: default dimensions are 80x24" {
+    "$VEX" session create >/dev/null
+
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"80"* ]]
+    [[ "$output" == *"24"* ]]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Session kill
+# ═══════════════════════════════════════════════════════════════════
+
+@test "session kill by full UUID" {
+    run "$VEX" session create
+    SID="$output"
+
+    run "$VEX" session kill "$SID"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"killed session"* ]]
+
+    wait_for_no_sessions
+}
+
+@test "session kill by UUID prefix" {
+    run "$VEX" session create
+    SID="$output"
+    PREFIX="${SID:0:8}"
+
+    run "$VEX" session kill "$PREFIX"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"killed session $SID"* ]]
+}
+
+@test "session kill: nonexistent UUID fails" {
+    run vex session kill "00000000-0000-0000-0000-000000000000"
+    [ "$status" -ne 0 ]
+}
+
+@test "session kill: no matching prefix fails" {
+    "$VEX" session create >/dev/null
+
+    run vex session kill "zzzzz"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no session matching"* ]]
+}
+
+@test "session kill: ambiguous prefix fails" {
+    for _ in $(seq 1 16); do
+        "$VEX" session create >/dev/null
+    done
+
+    # Empty prefix matches every session
+    run vex session kill ""
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ambiguous"* ]]
+}
+
+@test "killing all sessions leaves list empty" {
+    run "$VEX" session create
+    SID1="$output"
+    run "$VEX" session create
+    SID2="$output"
+
+    "$VEX" session kill "$SID1"
+    "$VEX" session kill "$SID2"
+
+    wait_for_no_sessions
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Prefix resolution
+# ═══════════════════════════════════════════════════════════════════
+
+@test "single-char prefix resolves when only one session exists" {
+    run "$VEX" session create
+    SID="$output"
+    PREFIX="${SID:0:1}"
+
+    run "$VEX" session kill "$PREFIX"
+    [ "$status" -eq 0 ]
+}
+
+@test "4-char prefix resolves to correct session" {
+    run "$VEX" session create
+    SID="$output"
+    PREFIX="${SID:0:4}"
+
+    run "$VEX" session kill "$PREFIX"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"killed session $SID"* ]]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Attach / detach
+# ═══════════════════════════════════════════════════════════════════
+
+@test "attach and detach with Ctrl+]" {
+    run "$VEX" session create
+    [ "$status" -eq 0 ]
+    SID="$output"
+
+    OUTPUT=$(attach_via_pty "$SID" "sleep 1; printf '\x1d'")
+    [[ "$OUTPUT" == *"detached"* ]]
+
+    # Session should still be alive after detach
+    run "$VEX" session list
+    [[ "$output" == *"$SID"* ]]
+}
+
+@test "session executes commands and streams output" {
+    run "$VEX" session create --shell /bin/sh
+    [ "$status" -eq 0 ]
+    SID="$output"
+
+    OUTPUT=$(attach_via_pty "$SID" "sleep 0.5; printf 'echo VEXMARKER42\n'; sleep 1; printf '\x1d'")
+    [[ "$OUTPUT" == *"VEXMARKER42"* ]]
+}
+
+@test "session persists across attach/detach cycles" {
+    run "$VEX" session create --shell /bin/sh
+    [ "$status" -eq 0 ]
+    SID="$output"
+
+    # First attach: create a file inside the session
+    attach_via_pty "$SID" "sleep 0.5; printf 'touch $TEST_TMPDIR/proof\n'; sleep 1; printf '\x1d'"
+
+    # File should exist (proves the command ran)
+    [ -f "$TEST_TMPDIR/proof" ]
+
+    # Second attach: verify session is still the same shell
+    OUTPUT=$(attach_via_pty "$SID" "sleep 0.5; printf 'ls $TEST_TMPDIR/proof\n'; sleep 1; printf '\x1d'")
+    [[ "$OUTPUT" == *"proof"* ]]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Error handling
+# ═══════════════════════════════════════════════════════════════════
+
+@test "client errors when daemon is not running" {
+    kill "$VEXD_PID" 2>/dev/null || true
+    wait "$VEXD_PID" 2>/dev/null || true
+    VEXD_PID=""
+    sleep 0.2
+
+    run "$VEX" session list
+    [ "$status" -ne 0 ]
+}
+
+@test "client errors with bad socket path" {
+    export VEX_SOCKET="/tmp/nonexistent/deep/path/vexd.sock"
+    run "$VEX" session list
+    [ "$status" -ne 0 ]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Daemon resilience
+# ═══════════════════════════════════════════════════════════════════
+
+@test "daemon serves multiple sequential clients" {
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+}
+
+@test "daemon handles rapid session creation" {
+    for _ in $(seq 1 5); do
+        run "$VEX" session create
+        [ "$status" -eq 0 ]
+        [[ "$output" =~ $UUID_RE ]]
+    done
+
+    run "$VEX" session list
+    [ "$status" -eq 0 ]
+    local count
+    count=$(echo "$output" | grep -c '[0-9a-f]\{8\}-')
+    [ "$count" -eq 5 ]
+}
+
+@test "vexd terminates all sessions on shutdown" {
+    "$VEX" session create >/dev/null
+    "$VEX" session create >/dev/null
+
+    kill "$VEXD_PID"
+    wait "$VEXD_PID" 2>/dev/null || true
+    VEXD_PID=""
+    sleep 0.2
+
+    [ ! -e "$VEX_SOCKET" ]
+}

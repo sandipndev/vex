@@ -148,29 +148,19 @@ impl SessionManager {
     }
 
     pub async fn kill_session(&self, id: Uuid) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        match sessions.get(&id) {
-            Some(_) => {
-                // Send SIGHUP to the session's PTY master side
-                // Dropping the pty writer will cause the child to get SIGHUP
-                // But we need to explicitly signal — for now just drop the writer
-                // The child waiter task will clean up
-                drop(sessions);
-                let pty_writer = {
-                    let sessions = self.sessions.lock().await;
-                    match sessions.get(&id) {
-                        Some(h) => Arc::clone(&h.pty_writer),
-                        None => return Ok(()),
-                    }
-                };
-                // Closing the writer end will send SIGHUP to the child
-                let mut writer = pty_writer.lock().await;
-                use tokio::io::AsyncWriteExt;
-                let _ = writer.shutdown().await;
-                Ok(())
-            }
-            None => bail!("session not found: {}", id),
-        }
+        let handle = {
+            let mut sessions = self.sessions.lock().await;
+            sessions
+                .remove(&id)
+                .ok_or_else(|| anyhow::anyhow!("session not found: {}", id))?
+        };
+
+        // Shutting down the writer closes the master side of the PTY,
+        // which sends SIGHUP to the child process.
+        let mut writer = handle.pty_writer.lock().await;
+        use tokio::io::AsyncWriteExt;
+        let _ = writer.shutdown().await;
+        Ok(())
     }
 
     pub async fn kill_all(&self) {
