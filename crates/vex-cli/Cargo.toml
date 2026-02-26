@@ -15,3 +15,19 @@ name = "vexd"
 path = "src/bin/vexd/main.rs"
 
 [dependencies]
+tokio = { version = "1", features = ["full"] }
+pty-process = { version = "0.5", features = ["async"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+nix = { version = "0.29", features = ["term", "signal"] }
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+terminal_size = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
