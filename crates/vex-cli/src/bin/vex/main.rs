@@ -28,7 +28,7 @@ struct Cli {
     connect: Option<SocketAddr>,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -39,22 +39,17 @@ enum Command {
         #[arg(long)]
         listen: Option<SocketAddr>,
     },
-    /// Manage sessions
-    Session {
-        #[command(subcommand)]
-        action: SessionAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum SessionAction {
     /// Create a new session
     Create {
         /// Shell to use (defaults to $SHELL or /bin/sh)
         #[arg(long)]
         shell: Option<String>,
+        /// Attach to the session immediately after creating it
+        #[arg(short, long)]
+        attach: bool,
     },
     /// List active sessions
+    #[command(alias = "ls")]
     List,
     /// Attach to a session
     Attach {
@@ -68,6 +63,37 @@ enum SessionAction {
     },
 }
 
+fn resolve_target_and_token(
+    connect: Option<SocketAddr>,
+    token: Option<String>,
+    socket_path: &std::path::Path,
+) -> Result<(session::Target, String)> {
+    match connect {
+        Some(addr) => {
+            let token = token.ok_or_else(|| {
+                anyhow::anyhow!("--token or VEX_TOKEN is required when using --connect")
+            })?;
+            Ok((session::Target::Tcp(addr), token))
+        }
+        None => {
+            let token = match token {
+                Some(t) => t,
+                None => {
+                    let token_path = socket_path.with_extension("token");
+                    std::fs::read_to_string(&token_path).map_err(|e| {
+                        anyhow::anyhow!(
+                            "could not read token from {}: {} (is the daemon running?)",
+                            token_path.display(),
+                            e
+                        )
+                    })?
+                }
+            };
+            Ok((session::Target::Unix(socket_path.to_path_buf()), token))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -76,48 +102,27 @@ async fn main() -> Result<()> {
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
 
     match cli.command {
-        Command::Daemon { listen } => {
+        Some(Command::Daemon { listen }) => {
             daemon::run(&socket_path, listen).await?;
         }
-        Command::Session { action } => {
-            let (target, token) = match cli.connect {
-                Some(addr) => {
-                    let token = cli.token.ok_or_else(|| {
-                        anyhow::anyhow!("--token or VEX_TOKEN is required when using --connect")
-                    })?;
-                    (session::Target::Tcp(addr), token)
-                }
-                None => {
-                    let token = match cli.token {
-                        Some(t) => t,
-                        None => {
-                            let token_path = socket_path.with_extension("token");
-                            std::fs::read_to_string(&token_path).map_err(|e| {
-                                anyhow::anyhow!(
-                                    "could not read token from {}: {} (is the daemon running?)",
-                                    token_path.display(),
-                                    e
-                                )
-                            })?
-                        }
-                    };
-                    (session::Target::Unix(socket_path.clone()), token)
-                }
-            };
-            match action {
-                SessionAction::Create { shell } => {
-                    session::session_create(&target, &token, shell).await?;
-                }
-                SessionAction::List => {
-                    session::session_list(&target, &token).await?;
-                }
-                SessionAction::Attach { id } => {
-                    session::session_attach(&target, &token, &id).await?;
-                }
-                SessionAction::Kill { id } => {
-                    session::session_kill(&target, &token, &id).await?;
-                }
+        Some(Command::Create { shell, attach }) => {
+            let (target, token) = resolve_target_and_token(cli.connect, cli.token, &socket_path)?;
+            let id = session::session_create(&target, &token, shell).await?;
+            if attach {
+                session::session_attach(&target, &token, &id).await?;
             }
+        }
+        Some(Command::Attach { id }) => {
+            let (target, token) = resolve_target_and_token(cli.connect, cli.token, &socket_path)?;
+            session::session_attach(&target, &token, &id).await?;
+        }
+        Some(Command::Kill { id }) => {
+            let (target, token) = resolve_target_and_token(cli.connect, cli.token, &socket_path)?;
+            session::session_kill(&target, &token, &id).await?;
+        }
+        Some(Command::List) | None => {
+            let (target, token) = resolve_target_and_token(cli.connect, cli.token, &socket_path)?;
+            session::session_list(&target, &token).await?;
         }
     }
 

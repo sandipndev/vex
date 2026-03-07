@@ -114,12 +114,13 @@ async fn request(target: &Target, token: &str, msg: &ClientMessage) -> Result<Se
     }
 }
 
-pub async fn session_create(target: &Target, token: &str, shell: Option<String>) -> Result<()> {
+pub async fn session_create(target: &Target, token: &str, shell: Option<String>) -> Result<String> {
     let resp = request(target, token, &ClientMessage::CreateSession { shell }).await?;
     match resp {
         ServerMessage::SessionCreated { id } => {
-            println!("{}", id);
-            Ok(())
+            let id_str = id.to_string();
+            println!("{}", id_str);
+            Ok(id_str)
         }
         ServerMessage::Error { message } => bail!("{}", message),
         other => bail!("unexpected response: {:?}", other),
