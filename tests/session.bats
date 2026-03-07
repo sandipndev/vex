@@ -375,3 +375,60 @@ attach_via_pty() {
 
     [ ! -e "$VEX_SOCKET" ]
 }
+
+# ═══════════════════════════════════════════════════════════════════
+#  TCP transport
+# ═══════════════════════════════════════════════════════════════════
+
+@test "tcp: session create and list over TCP" {
+    # Restart daemon with --listen on a random port
+    kill "$VEXD_PID" 2>/dev/null || true
+    wait "$VEXD_PID" 2>/dev/null || true
+
+    TCP_PORT=$((20000 + RANDOM % 10000))
+    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
+    VEXD_PID=$!
+
+    local i
+    for i in $(seq 1 50); do
+        [ -S "$VEX_SOCKET" ] && break
+        sleep 0.1
+    done
+
+    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
+
+    # Create a session via TCP
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" session create
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ $UUID_RE ]]
+    SID="$output"
+
+    # List sessions via TCP
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" session list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$SID"* ]]
+
+    # Kill session via TCP
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" session kill "$SID"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"killed session"* ]]
+}
+
+@test "tcp: wrong token rejected over TCP" {
+    kill "$VEXD_PID" 2>/dev/null || true
+    wait "$VEXD_PID" 2>/dev/null || true
+
+    TCP_PORT=$((20000 + RANDOM % 10000))
+    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
+    VEXD_PID=$!
+
+    local i
+    for i in $(seq 1 50); do
+        [ -S "$VEX_SOCKET" ] && break
+        sleep 0.1
+    done
+
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "wrong-token" session list
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid token"* ]]
+}

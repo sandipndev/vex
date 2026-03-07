@@ -1,6 +1,7 @@
 mod daemon;
 mod session;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -25,6 +26,10 @@ struct Cli {
     #[arg(long, env = "VEX_TOKEN")]
     token: Option<String>,
 
+    /// Connect to a remote daemon over TCP (e.g. 192.168.1.5:9090)
+    #[arg(long, env = "VEX_CONNECT")]
+    connect: Option<SocketAddr>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -32,7 +37,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Start the daemon
-    Daemon,
+    Daemon {
+        /// Also listen on a TCP address for remote clients (e.g. 0.0.0.0:9090)
+        #[arg(long)]
+        listen: Option<SocketAddr>,
+    },
     /// Manage sessions
     Session {
         #[command(subcommand)]
@@ -70,10 +79,14 @@ async fn main() -> Result<()> {
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
 
     match cli.command {
-        Command::Daemon => {
-            daemon::run(&socket_path).await?;
+        Command::Daemon { listen } => {
+            daemon::run(&socket_path, listen).await?;
         }
         Command::Session { action } => {
+            let target = match cli.connect {
+                Some(addr) => session::Target::Tcp(addr),
+                None => session::Target::Unix(socket_path.clone()),
+            };
             let token = match cli.token {
                 Some(t) => t,
                 None => {
@@ -89,16 +102,16 @@ async fn main() -> Result<()> {
             };
             match action {
                 SessionAction::Create { shell } => {
-                    session::session_create(&socket_path, &token, shell).await?;
+                    session::session_create(&target, &token, shell).await?;
                 }
                 SessionAction::List => {
-                    session::session_list(&socket_path, &token).await?;
+                    session::session_list(&target, &token).await?;
                 }
                 SessionAction::Attach { id } => {
-                    session::session_attach(&socket_path, &token, &id).await?;
+                    session::session_attach(&target, &token, &id).await?;
                 }
                 SessionAction::Kill { id } => {
-                    session::session_kill(&socket_path, &token, &id).await?;
+                    session::session_kill(&target, &token, &id).await?;
                 }
             }
         }

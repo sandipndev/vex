@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::io::WriteHalf;
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -18,8 +17,8 @@ struct AttachState {
     event_rx: broadcast::Receiver<ServerMessage>,
 }
 
-pub async fn handle_connection(
-    stream: UnixStream,
+pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    stream: S,
     manager: Arc<SessionManager>,
     token: Arc<String>,
 ) {
@@ -28,8 +27,8 @@ pub async fn handle_connection(
     }
 }
 
-async fn handle_connection_inner(
-    stream: UnixStream,
+async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    stream: S,
     manager: &SessionManager,
     token: &str,
 ) -> Result<()> {
@@ -92,10 +91,10 @@ async fn handle_connection_inner(
     result
 }
 
-async fn connection_loop(
+async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     client_id: Uuid,
-    reader: &mut tokio::io::ReadHalf<UnixStream>,
-    writer: &mut WriteHalf<UnixStream>,
+    reader: &mut R,
+    writer: &mut W,
     attached: &mut Option<AttachState>,
     manager: &SessionManager,
 ) -> Result<()> {
@@ -248,10 +247,10 @@ async fn connection_loop(
     Ok(())
 }
 
-async fn handle_control_idle(
+async fn handle_control_idle<W: AsyncWrite + Unpin>(
     msg: ClientMessage,
     manager: &SessionManager,
-    writer: &mut WriteHalf<UnixStream>,
+    writer: &mut W,
 ) -> Result<()> {
     match msg {
         ClientMessage::CreateSession { shell } => {
