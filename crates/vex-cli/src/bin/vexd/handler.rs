@@ -67,6 +67,11 @@ async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -
                                         send_server_message(&mut writer, &ServerMessage::Error {
                                             message: format!("kill error: {}", e),
                                         }).await?;
+                                    } else {
+                                        send_server_message(&mut writer, &ServerMessage::SessionEnded {
+                                            id,
+                                            exit_code: None,
+                                        }).await?;
                                     }
                                 }
                                 other => {
@@ -185,6 +190,15 @@ async fn handle_control_idle(
                     writer,
                     &ServerMessage::Error {
                         message: format!("kill error: {}", e),
+                    },
+                )
+                .await?;
+            } else {
+                send_server_message(
+                    writer,
+                    &ServerMessage::SessionEnded {
+                        id,
+                        exit_code: None,
                     },
                 )
                 .await?;
