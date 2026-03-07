@@ -113,11 +113,8 @@ async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -
                     if let ClientMessage::AttachSession { id } = msg {
                         match manager.attach_session(id).await {
                             Ok((scrollback, output_rx)) => {
-                                send_server_message(
-                                    &mut writer,
-                                    &ServerMessage::Attached { id },
-                                )
-                                .await?;
+                                send_server_message(&mut writer, &ServerMessage::Attached { id })
+                                    .await?;
                                 if !scrollback.is_empty() {
                                     write_data(&mut writer, &scrollback).await?;
                                 }
