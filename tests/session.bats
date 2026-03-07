@@ -118,6 +118,13 @@ attach_via_pty() {
     [ "$ID1" != "$ID2" ]
 }
 
+@test "create --attach creates and attaches" {
+    OUTPUT=$( (sleep 0.5; printf 'echo CREATEATTACH\n'; sleep 1; printf '\x1d') \
+        | timeout 5 script -qec "$VEX create --attach --shell /bin/sh" /dev/null 2>&1 || true)
+    [[ "$OUTPUT" == *"CREATEATTACH"* ]]
+    [[ "$OUTPUT" == *"detached"* ]]
+}
+
 # ═══════════════════════════════════════════════════════════════════
 #  Session list
 # ═══════════════════════════════════════════════════════════════════

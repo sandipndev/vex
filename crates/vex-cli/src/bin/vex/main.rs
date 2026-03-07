@@ -44,6 +44,9 @@ enum Command {
         /// Shell to use (defaults to $SHELL or /bin/sh)
         #[arg(long)]
         shell: Option<String>,
+        /// Attach to the session immediately after creating it
+        #[arg(short, long)]
+        attach: bool,
     },
     /// List active sessions
     #[command(alias = "ls")]
@@ -102,9 +105,12 @@ async fn main() -> Result<()> {
         Some(Command::Daemon { listen }) => {
             daemon::run(&socket_path, listen).await?;
         }
-        Some(Command::Create { shell }) => {
+        Some(Command::Create { shell, attach }) => {
             let (target, token) = resolve_target_and_token(cli.connect, cli.token, &socket_path)?;
-            session::session_create(&target, &token, shell).await?;
+            let id = session::session_create(&target, &token, shell).await?;
+            if attach {
+                session::session_attach(&target, &token, &id).await?;
+            }
         }
         Some(Command::Attach { id }) => {
             let (target, token) = resolve_target_and_token(cli.connect, cli.token, &socket_path)?;
