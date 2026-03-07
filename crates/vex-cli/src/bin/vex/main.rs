@@ -8,9 +8,6 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 fn default_socket_path() -> PathBuf {
-    if let Ok(path) = std::env::var("VEX_SOCKET") {
-        return PathBuf::from(path);
-    }
     let home = dirs::home_dir().expect("could not determine home directory");
     home.join(".vex").join("vexd.sock")
 }
@@ -83,21 +80,28 @@ async fn main() -> Result<()> {
             daemon::run(&socket_path, listen).await?;
         }
         Command::Session { action } => {
-            let target = match cli.connect {
-                Some(addr) => session::Target::Tcp(addr),
-                None => session::Target::Unix(socket_path.clone()),
-            };
-            let token = match cli.token {
-                Some(t) => t,
+            let (target, token) = match cli.connect {
+                Some(addr) => {
+                    let token = cli.token.ok_or_else(|| {
+                        anyhow::anyhow!("--token or VEX_TOKEN is required when using --connect")
+                    })?;
+                    (session::Target::Tcp(addr), token)
+                }
                 None => {
-                    let token_path = socket_path.with_extension("token");
-                    std::fs::read_to_string(&token_path).map_err(|e| {
-                        anyhow::anyhow!(
-                            "could not read token from {}: {} (is the daemon running?)",
-                            token_path.display(),
-                            e
-                        )
-                    })?
+                    let token = match cli.token {
+                        Some(t) => t,
+                        None => {
+                            let token_path = socket_path.with_extension("token");
+                            std::fs::read_to_string(&token_path).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "could not read token from {}: {} (is the daemon running?)",
+                                    token_path.display(),
+                                    e
+                                )
+                            })?
+                        }
+                    };
+                    (session::Target::Unix(socket_path.clone()), token)
                 }
             };
             match action {
