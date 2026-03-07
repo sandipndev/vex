@@ -19,63 +19,84 @@ pub async fn handle_connection(stream: UnixStream, manager: Arc<SessionManager>)
 }
 
 async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -> Result<()> {
+    let client_id = Uuid::new_v4();
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut attached: Option<(Uuid, broadcast::Receiver<Vec<u8>>)> = None;
 
+    let result = connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
+
+    // Ensure we unregister the client on any exit path
+    if let Some((session_id, _)) = attached {
+        manager.client_detach(session_id, client_id).await;
+    }
+
+    result
+}
+
+async fn connection_loop(
+    client_id: Uuid,
+    reader: &mut tokio::io::ReadHalf<UnixStream>,
+    writer: &mut WriteHalf<UnixStream>,
+    attached: &mut Option<(Uuid, broadcast::Receiver<Vec<u8>>)>,
+    manager: &SessionManager,
+) -> Result<()> {
     loop {
-        if let Some((session_id, ref mut output_rx)) = attached {
+        if let Some((session_id, output_rx)) = attached {
             // Attached state: select on client frames OR session output
             tokio::select! {
-                frame = read_frame(&mut reader) => {
+                frame = read_frame(reader) => {
                     match frame? {
                         None => {
-                            info!("client disconnected while attached to {}", session_id);
+                            info!("client {} disconnected while attached to {}", client_id, session_id);
                             break;
                         }
                         Some(Frame::Data(data)) => {
-                            if let Err(e) = manager.write_input(session_id, &data).await {
+                            if let Err(e) = manager.write_input(*session_id, &data).await {
                                 warn!("write_input error: {}", e);
                                 send_server_message(
-                                    &mut writer,
+                                    writer,
                                     &ServerMessage::Error {
                                         message: format!("session write error: {}", e),
                                     },
                                 ).await?;
-                                attached = None;
+                                manager.client_detach(*session_id, client_id).await;
+                                *attached = None;
                             }
                         }
                         Some(Frame::Control(data)) => {
                             let msg: ClientMessage = serde_json::from_slice(&data)?;
                             match msg {
                                 ClientMessage::DetachSession => {
-                                    info!("client detaching from session {}", session_id);
-                                    send_server_message(&mut writer, &ServerMessage::Detached).await?;
-                                    attached = None;
+                                    info!("client {} detaching from session {}", client_id, *session_id);
+                                    manager.client_detach(*session_id, client_id).await;
+                                    send_server_message(writer, &ServerMessage::Detached).await?;
+                                    *attached = None;
                                 }
                                 ClientMessage::ResizeSession { id, cols, rows } => {
-                                    if let Err(e) = manager.resize_session(id, cols, rows).await {
-                                        send_server_message(&mut writer, &ServerMessage::Error {
+                                    if let Err(e) = manager.client_resize(id, client_id, cols, rows).await {
+                                        send_server_message(writer, &ServerMessage::Error {
                                             message: format!("resize error: {}", e),
                                         }).await?;
                                     }
                                 }
                                 ClientMessage::KillSession { id } => {
-                                    if id == session_id {
-                                        attached = None;
+                                    if id == *session_id {
+                                        manager.client_detach(*session_id, client_id).await;
+                                        *attached = None;
                                     }
                                     if let Err(e) = manager.kill_session(id).await {
-                                        send_server_message(&mut writer, &ServerMessage::Error {
+                                        send_server_message(writer, &ServerMessage::Error {
                                             message: format!("kill error: {}", e),
                                         }).await?;
                                     } else {
-                                        send_server_message(&mut writer, &ServerMessage::SessionEnded {
+                                        send_server_message(writer, &ServerMessage::SessionEnded {
                                             id,
                                             exit_code: None,
                                         }).await?;
                                     }
                                 }
                                 other => {
-                                    handle_control_idle(other, manager, &mut writer).await?;
+                                    handle_control_idle(other, manager, writer).await?;
                                 }
                             }
                         }
@@ -84,16 +105,16 @@ async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -
                 output = output_rx.recv() => {
                     match output {
                         Ok(data) => {
-                            write_data(&mut writer, &data).await?;
+                            write_data(writer, &data).await?;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            // Session ended
                             info!("session {} output closed", session_id);
-                            send_server_message(&mut writer, &ServerMessage::SessionEnded {
-                                id: session_id,
+                            manager.client_detach(*session_id, client_id).await;
+                            send_server_message(writer, &ServerMessage::SessionEnded {
+                                id: *session_id,
                                 exit_code: None,
                             }).await?;
-                            attached = None;
+                            *attached = None;
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!("output lagged by {} messages for session {}", n, session_id);
@@ -103,9 +124,9 @@ async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -
             }
         } else {
             // Idle state: only read client frames
-            match read_frame(&mut reader).await? {
+            match read_frame(reader).await? {
                 None => {
-                    info!("client disconnected");
+                    info!("client {} disconnected", client_id);
                     break;
                 }
                 Some(Frame::Control(data)) => {
@@ -113,16 +134,19 @@ async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -
                     if let ClientMessage::AttachSession { id } = msg {
                         match manager.attach_session(id).await {
                             Ok((scrollback, output_rx)) => {
-                                send_server_message(&mut writer, &ServerMessage::Attached { id })
+                                // Register client with default size; the client
+                                // sends a ResizeSession immediately after attach.
+                                let _ = manager.client_attach(id, client_id, 80, 24).await;
+                                send_server_message(writer, &ServerMessage::Attached { id })
                                     .await?;
                                 if !scrollback.is_empty() {
-                                    write_data(&mut writer, &scrollback).await?;
+                                    write_data(writer, &scrollback).await?;
                                 }
-                                attached = Some((id, output_rx));
+                                *attached = Some((id, output_rx));
                             }
                             Err(e) => {
                                 send_server_message(
-                                    &mut writer,
+                                    writer,
                                     &ServerMessage::Error {
                                         message: e.to_string(),
                                     },
@@ -131,12 +155,12 @@ async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -
                             }
                         }
                     } else {
-                        handle_control_idle(msg, manager, &mut writer).await?;
+                        handle_control_idle(msg, manager, writer).await?;
                     }
                 }
                 Some(Frame::Data(_)) => {
                     send_server_message(
-                        &mut writer,
+                        writer,
                         &ServerMessage::Error {
                             message: "not attached to any session".into(),
                         },
@@ -178,16 +202,14 @@ async fn handle_control_idle(
             let sessions = manager.list_sessions().await;
             send_server_message(writer, &ServerMessage::Sessions { sessions }).await?;
         }
-        ClientMessage::ResizeSession { id, cols, rows } => {
-            if let Err(e) = manager.resize_session(id, cols, rows).await {
-                send_server_message(
-                    writer,
-                    &ServerMessage::Error {
-                        message: format!("resize error: {}", e),
-                    },
-                )
-                .await?;
-            }
+        ClientMessage::ResizeSession { .. } => {
+            send_server_message(
+                writer,
+                &ServerMessage::Error {
+                    message: "not attached to any session".into(),
+                },
+            )
+            .await?;
         }
         ClientMessage::KillSession { id } => {
             if let Err(e) = manager.kill_session(id).await {
