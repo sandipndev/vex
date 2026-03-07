@@ -26,6 +26,8 @@ pub enum ServerMessage {
     Attached { id: Uuid },
     Detached,
     SessionEnded { id: Uuid, exit_code: Option<i32> },
+    ClientJoined { session_id: Uuid, client_id: Uuid },
+    ClientLeft { session_id: Uuid, client_id: Uuid },
     Error { message: String },
 }
 
@@ -35,6 +37,7 @@ pub struct SessionInfo {
     pub cols: u16,
     pub rows: u16,
     pub created_at: DateTime<Utc>,
+    pub client_count: usize,
 }
 
 #[derive(Debug)]
@@ -144,6 +147,7 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     created_at: Utc::now(),
+                    client_count: 2,
                 }],
             },
             ServerMessage::Attached { id: Uuid::nil() },
@@ -151,6 +155,14 @@ mod tests {
             ServerMessage::SessionEnded {
                 id: Uuid::nil(),
                 exit_code: Some(0),
+            },
+            ServerMessage::ClientJoined {
+                session_id: Uuid::nil(),
+                client_id: Uuid::nil(),
+            },
+            ServerMessage::ClientLeft {
+                session_id: Uuid::nil(),
+                client_id: Uuid::nil(),
             },
             ServerMessage::Error {
                 message: "fail".into(),

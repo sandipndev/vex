@@ -49,13 +49,17 @@ pub async fn session_list(socket_path: &Path) -> Result<()> {
             if sessions.is_empty() {
                 println!("no active sessions");
             } else {
-                println!("{:<36}  {:>4} x {:<4}  CREATED", "ID", "COLS", "ROWS");
+                println!(
+                    "{:<36}  {:>4} x {:<4}  {:>7}  CREATED",
+                    "ID", "COLS", "ROWS", "CLIENTS"
+                );
                 for s in sessions {
                     println!(
-                        "{:<36}  {:>4} x {:<4}  {}",
+                        "{:<36}  {:>4} x {:<4}  {:>7}  {}",
                         s.id,
                         s.cols,
                         s.rows,
+                        s.client_count,
                         s.created_at.format("%Y-%m-%d %H:%M:%S")
                     );
                 }
