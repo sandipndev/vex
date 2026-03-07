@@ -9,15 +9,38 @@ use vex_cli::proto::{
     ClientMessage, Frame, ServerMessage, read_frame, send_client_message, write_data,
 };
 
-async fn connect(socket_path: &Path) -> Result<UnixStream> {
-    let stream = UnixStream::connect(socket_path).await?;
-    Ok(stream)
+async fn authenticate(
+    reader: &mut tokio::io::ReadHalf<UnixStream>,
+    writer: &mut tokio::io::WriteHalf<UnixStream>,
+    token: &str,
+) -> Result<()> {
+    send_client_message(
+        writer,
+        &ClientMessage::Authenticate {
+            token: token.to_string(),
+        },
+    )
+    .await?;
+    match read_frame(reader).await? {
+        Some(Frame::Control(data)) => {
+            let resp: ServerMessage = serde_json::from_slice(&data)?;
+            match resp {
+                ServerMessage::Authenticated => Ok(()),
+                ServerMessage::Error { message } => bail!("{}", message),
+                other => bail!("unexpected response: {:?}", other),
+            }
+        }
+        Some(Frame::Data(_)) => bail!("unexpected data frame"),
+        None => bail!("server closed connection"),
+    }
 }
 
 /// Send a control message and read back a single control response.
-async fn request(socket_path: &Path, msg: &ClientMessage) -> Result<ServerMessage> {
-    let stream = connect(socket_path).await?;
+async fn request(socket_path: &Path, token: &str, msg: &ClientMessage) -> Result<ServerMessage> {
+    let stream = UnixStream::connect(socket_path).await?;
     let (mut reader, mut writer) = io::split(stream);
+
+    authenticate(&mut reader, &mut writer, token).await?;
     send_client_message(&mut writer, msg).await?;
 
     match read_frame(&mut reader).await? {
@@ -30,8 +53,8 @@ async fn request(socket_path: &Path, msg: &ClientMessage) -> Result<ServerMessag
     }
 }
 
-pub async fn session_create(socket_path: &Path, shell: Option<String>) -> Result<()> {
-    let resp = request(socket_path, &ClientMessage::CreateSession { shell }).await?;
+pub async fn session_create(socket_path: &Path, token: &str, shell: Option<String>) -> Result<()> {
+    let resp = request(socket_path, token, &ClientMessage::CreateSession { shell }).await?;
     match resp {
         ServerMessage::SessionCreated { id } => {
             println!("{}", id);
@@ -42,8 +65,8 @@ pub async fn session_create(socket_path: &Path, shell: Option<String>) -> Result
     }
 }
 
-pub async fn session_list(socket_path: &Path) -> Result<()> {
-    let resp = request(socket_path, &ClientMessage::ListSessions).await?;
+pub async fn session_list(socket_path: &Path, token: &str) -> Result<()> {
+    let resp = request(socket_path, token, &ClientMessage::ListSessions).await?;
     match resp {
         ServerMessage::Sessions { sessions } => {
             if sessions.is_empty() {
@@ -71,9 +94,9 @@ pub async fn session_list(socket_path: &Path) -> Result<()> {
     }
 }
 
-pub async fn session_kill(socket_path: &Path, id_prefix: &str) -> Result<()> {
-    let id = resolve_session_id(socket_path, id_prefix).await?;
-    let resp = request(socket_path, &ClientMessage::KillSession { id }).await?;
+pub async fn session_kill(socket_path: &Path, token: &str, id_prefix: &str) -> Result<()> {
+    let id = resolve_session_id(socket_path, token, id_prefix).await?;
+    let resp = request(socket_path, token, &ClientMessage::KillSession { id }).await?;
     match resp {
         ServerMessage::Error { message } => bail!("{}", message),
         _ => {
@@ -83,11 +106,14 @@ pub async fn session_kill(socket_path: &Path, id_prefix: &str) -> Result<()> {
     }
 }
 
-pub async fn session_attach(socket_path: &Path, id_prefix: &str) -> Result<()> {
-    let id = resolve_session_id(socket_path, id_prefix).await?;
+pub async fn session_attach(socket_path: &Path, token: &str, id_prefix: &str) -> Result<()> {
+    let id = resolve_session_id(socket_path, token, id_prefix).await?;
 
-    let stream = connect(socket_path).await?;
+    let stream = UnixStream::connect(socket_path).await?;
     let (mut reader, mut writer) = io::split(stream);
+
+    // Authenticate first
+    authenticate(&mut reader, &mut writer, token).await?;
 
     // Send attach request
     send_client_message(&mut writer, &ClientMessage::AttachSession { id }).await?;
@@ -216,14 +242,14 @@ pub async fn session_attach(socket_path: &Path, id_prefix: &str) -> Result<()> {
     result
 }
 
-async fn resolve_session_id(socket_path: &Path, prefix: &str) -> Result<Uuid> {
+async fn resolve_session_id(socket_path: &Path, token: &str, prefix: &str) -> Result<Uuid> {
     // Try parsing as a full UUID first
     if let Ok(id) = prefix.parse::<Uuid>() {
         return Ok(id);
     }
 
     // Otherwise, treat as a prefix and list sessions to find a match
-    let resp = request(socket_path, &ClientMessage::ListSessions).await?;
+    let resp = request(socket_path, token, &ClientMessage::ListSessions).await?;
     match resp {
         ServerMessage::Sessions { sessions } => {
             let matches: Vec<_> = sessions

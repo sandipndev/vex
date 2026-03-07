@@ -70,22 +70,28 @@ attach_via_pty() {
     [ -S "$VEX_SOCKET" ]
 }
 
-@test "vexd removes socket on SIGTERM" {
+@test "vexd removes socket and token on SIGTERM" {
     [ -S "$VEX_SOCKET" ]
+    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
+    [ -f "$TOKEN_PATH" ]
     kill "$VEXD_PID"
     wait "$VEXD_PID" 2>/dev/null || true
     VEXD_PID=""
     sleep 0.2
     [ ! -e "$VEX_SOCKET" ]
+    [ ! -e "$TOKEN_PATH" ]
 }
 
-@test "vexd removes socket on SIGINT" {
+@test "vexd removes socket and token on SIGINT" {
     [ -S "$VEX_SOCKET" ]
+    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
+    [ -f "$TOKEN_PATH" ]
     kill -INT "$VEXD_PID"
     wait "$VEXD_PID" 2>/dev/null || true
     VEXD_PID=""
     sleep 0.2
     [ ! -e "$VEX_SOCKET" ]
+    [ ! -e "$TOKEN_PATH" ]
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -300,6 +306,35 @@ attach_via_pty() {
     export VEX_SOCKET="/tmp/nonexistent/deep/path/vexd.sock"
     run "$VEX" session list
     [ "$status" -ne 0 ]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Authentication
+# ═══════════════════════════════════════════════════════════════════
+
+@test "daemon writes token file on startup" {
+    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
+    [ -f "$TOKEN_PATH" ]
+    [ -n "$(cat "$TOKEN_PATH")" ]
+}
+
+@test "token file has restrictive permissions" {
+    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
+    PERMS=$(stat -c '%a' "$TOKEN_PATH")
+    [ "$PERMS" = "600" ]
+}
+
+@test "wrong token is rejected" {
+    run env VEX_TOKEN="bad-token-value" "$VEX" session list
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid token"* ]]
+}
+
+@test "explicit correct token works" {
+    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
+    TOKEN=$(cat "$TOKEN_PATH")
+    run "$VEX" --token "$TOKEN" session list
+    [ "$status" -eq 0 ]
 }
 
 # ═══════════════════════════════════════════════════════════════════
