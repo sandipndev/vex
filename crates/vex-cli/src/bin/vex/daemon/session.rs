@@ -9,6 +9,8 @@ use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 use vex_cli::proto::SessionInfo;
 
+const MAX_SCROLLBACK: usize = 64 * 1024;
+
 pub struct SessionHandle {
     pub id: Uuid,
     pub cols: u16,
@@ -16,6 +18,7 @@ pub struct SessionHandle {
     pub created_at: chrono::DateTime<Utc>,
     pub pty_writer: Arc<Mutex<pty_process::OwnedWritePty>>,
     pub output_tx: broadcast::Sender<Vec<u8>>,
+    pub scrollback: Arc<Mutex<Vec<u8>>>,
 }
 
 pub struct SessionManager {
@@ -47,6 +50,7 @@ impl SessionManager {
 
         let (read_pty, write_pty) = pty.into_split();
         let (output_tx, _) = broadcast::channel(256);
+        let scrollback = Arc::new(Mutex::new(Vec::new()));
 
         let id = Uuid::new_v4();
         let handle = SessionHandle {
@@ -56,6 +60,7 @@ impl SessionManager {
             created_at: Utc::now(),
             pty_writer: Arc::new(Mutex::new(write_pty)),
             output_tx: output_tx.clone(),
+            scrollback: Arc::clone(&scrollback),
         };
 
         {
@@ -63,8 +68,8 @@ impl SessionManager {
             sessions.insert(id, handle);
         }
 
-        // PTY reader task
-        let output_tx_clone = output_tx;
+        // PTY reader task: append to scrollback and broadcast under the same
+        // lock so that attach_session can atomically snapshot + subscribe.
         tokio::spawn(async move {
             let mut read_pty = read_pty;
             let mut buf = [0u8; 4096];
@@ -72,7 +77,14 @@ impl SessionManager {
                 match read_pty.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let _ = output_tx_clone.send(buf[..n].to_vec());
+                        let chunk = &buf[..n];
+                        let mut sb = scrollback.lock().await;
+                        sb.extend_from_slice(chunk);
+                        if sb.len() > MAX_SCROLLBACK {
+                            let drain = sb.len() - MAX_SCROLLBACK;
+                            sb.drain(..drain);
+                        }
+                        let _ = output_tx.send(chunk.to_vec());
                     }
                     Err(_) => break,
                 }
@@ -105,10 +117,20 @@ impl SessionManager {
             .collect()
     }
 
-    pub async fn subscribe_output(&self, id: Uuid) -> Result<broadcast::Receiver<Vec<u8>>> {
+    /// Atomically snapshot the scrollback buffer and subscribe to live output.
+    /// This guarantees no gaps or duplicates between the replay and the stream.
+    pub async fn attach_session(
+        &self,
+        id: Uuid,
+    ) -> Result<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let sessions = self.sessions.lock().await;
         match sessions.get(&id) {
-            Some(h) => Ok(h.output_tx.subscribe()),
+            Some(h) => {
+                let sb = h.scrollback.lock().await;
+                let buffer = sb.clone();
+                let rx = h.output_tx.subscribe();
+                Ok((buffer, rx))
+            }
             None => bail!("session not found: {}", id),
         }
     }
@@ -171,10 +193,5 @@ impl SessionManager {
         for id in ids {
             let _ = self.kill_session(id).await;
         }
-    }
-
-    pub async fn session_exists(&self, id: Uuid) -> bool {
-        let sessions = self.sessions.lock().await;
-        sessions.contains_key(&id)
     }
 }

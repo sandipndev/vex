@@ -111,19 +111,24 @@ async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -
                 Some(Frame::Control(data)) => {
                     let msg: ClientMessage = serde_json::from_slice(&data)?;
                     if let ClientMessage::AttachSession { id } = msg {
-                        if !manager.session_exists(id).await {
-                            send_server_message(
-                                &mut writer,
-                                &ServerMessage::Error {
-                                    message: format!("session not found: {}", id),
-                                },
-                            )
-                            .await?;
-                        } else {
-                            let output_rx = manager.subscribe_output(id).await?;
-                            send_server_message(&mut writer, &ServerMessage::Attached { id })
+                        match manager.attach_session(id).await {
+                            Ok((scrollback, output_rx)) => {
+                                send_server_message(&mut writer, &ServerMessage::Attached { id })
+                                    .await?;
+                                if !scrollback.is_empty() {
+                                    write_data(&mut writer, &scrollback).await?;
+                                }
+                                attached = Some((id, output_rx));
+                            }
+                            Err(e) => {
+                                send_server_message(
+                                    &mut writer,
+                                    &ServerMessage::Error {
+                                        message: e.to_string(),
+                                    },
+                                )
                                 .await?;
-                            attached = Some((id, output_rx));
+                            }
                         }
                     } else {
                         handle_control_idle(msg, manager, &mut writer).await?;
