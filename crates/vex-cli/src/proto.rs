@@ -10,6 +10,7 @@ const TAG_DATA: u8 = 0x02;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
+    Authenticate { token: String },
     CreateSession { shell: Option<String> },
     ListSessions,
     AttachSession { id: Uuid },
@@ -21,6 +22,7 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
+    Authenticated,
     SessionCreated { id: Uuid },
     Sessions { sessions: Vec<SessionInfo> },
     Attached { id: Uuid },
@@ -117,6 +119,9 @@ mod tests {
     #[test]
     fn serde_round_trip_client() {
         let msgs = vec![
+            ClientMessage::Authenticate {
+                token: "test-token".into(),
+            },
             ClientMessage::CreateSession {
                 shell: Some("bash".into()),
             },
@@ -140,6 +145,7 @@ mod tests {
     #[test]
     fn serde_round_trip_server() {
         let msgs = vec![
+            ServerMessage::Authenticated,
             ServerMessage::SessionCreated { id: Uuid::nil() },
             ServerMessage::Sessions {
                 sessions: vec![SessionInfo {

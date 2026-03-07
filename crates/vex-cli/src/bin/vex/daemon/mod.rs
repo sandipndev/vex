@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::net::UnixListener;
 use tracing::{error, info};
+use uuid::Uuid;
 
 use session::SessionManager;
 
@@ -21,6 +22,17 @@ pub async fn run(socket_path: &Path) -> Result<()> {
         std::fs::remove_file(socket_path)?;
     }
 
+    // Generate auth token and write to file
+    let token = Arc::new(Uuid::new_v4().to_string());
+    let token_path = socket_path.with_extension("token");
+    std::fs::write(&token_path, token.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    info!("auth token written to {}", token_path.display());
+
     let listener = UnixListener::bind(socket_path)?;
     info!("vex daemon listening on {}", socket_path.display());
 
@@ -29,6 +41,7 @@ pub async fn run(socket_path: &Path) -> Result<()> {
     // Signal handler for graceful shutdown
     let manager_signal = Arc::clone(&manager);
     let socket_path_signal = socket_path.to_owned();
+    let token_path_signal = token_path.clone();
     tokio::spawn(async move {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
@@ -47,6 +60,7 @@ pub async fn run(socket_path: &Path) -> Result<()> {
         info!("shutting down...");
         manager_signal.kill_all().await;
         let _ = std::fs::remove_file(&socket_path_signal);
+        let _ = std::fs::remove_file(&token_path_signal);
         std::process::exit(0);
     });
 
@@ -56,8 +70,9 @@ pub async fn run(socket_path: &Path) -> Result<()> {
             Ok((stream, _addr)) => {
                 info!("new client connection");
                 let manager = Arc::clone(&manager);
+                let token = Arc::clone(&token);
                 tokio::spawn(async move {
-                    handler::handle_connection(stream, manager).await;
+                    handler::handle_connection(stream, manager, token).await;
                 });
             }
             Err(e) => {

@@ -18,17 +18,70 @@ struct AttachState {
     event_rx: broadcast::Receiver<ServerMessage>,
 }
 
-pub async fn handle_connection(stream: UnixStream, manager: Arc<SessionManager>) {
-    if let Err(e) = handle_connection_inner(stream, &manager).await {
+pub async fn handle_connection(
+    stream: UnixStream,
+    manager: Arc<SessionManager>,
+    token: Arc<String>,
+) {
+    if let Err(e) = handle_connection_inner(stream, &manager, &token).await {
         warn!("connection handler error: {}", e);
     }
 }
 
-async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -> Result<()> {
+async fn handle_connection_inner(
+    stream: UnixStream,
+    manager: &SessionManager,
+    token: &str,
+) -> Result<()> {
     let client_id = Uuid::new_v4();
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let mut attached: Option<AttachState> = None;
 
+    // First frame must be Authenticate
+    match read_frame(&mut reader).await? {
+        Some(Frame::Control(data)) => {
+            let msg: ClientMessage = serde_json::from_slice(&data)?;
+            match msg {
+                ClientMessage::Authenticate {
+                    token: client_token,
+                } => {
+                    if client_token != token {
+                        send_server_message(
+                            &mut writer,
+                            &ServerMessage::Error {
+                                message: "invalid token".into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    send_server_message(&mut writer, &ServerMessage::Authenticated).await?;
+                }
+                _ => {
+                    send_server_message(
+                        &mut writer,
+                        &ServerMessage::Error {
+                            message: "authentication required".into(),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        }
+        Some(Frame::Data(_)) => {
+            send_server_message(
+                &mut writer,
+                &ServerMessage::Error {
+                    message: "authentication required".into(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        None => return Ok(()),
+    }
+
+    let mut attached: Option<AttachState> = None;
     let result = connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
 
     // Ensure we unregister the client on any exit path
@@ -263,6 +316,15 @@ async fn handle_control_idle(
         }
         ClientMessage::AttachSession { .. } => {
             // Handled in the main loop
+        }
+        ClientMessage::Authenticate { .. } => {
+            send_server_message(
+                writer,
+                &ServerMessage::Error {
+                    message: "already authenticated".into(),
+                },
+            )
+            .await?;
         }
     }
     Ok(())

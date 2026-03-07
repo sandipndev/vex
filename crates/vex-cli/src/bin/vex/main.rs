@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long, env = "VEX_SOCKET")]
     socket: Option<PathBuf>,
 
+    /// Auth token (defaults to reading <socket_dir>/vexd.token)
+    #[arg(long, env = "VEX_TOKEN")]
+    token: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -69,20 +73,35 @@ async fn main() -> Result<()> {
         Command::Daemon => {
             daemon::run(&socket_path).await?;
         }
-        Command::Session { action } => match action {
-            SessionAction::Create { shell } => {
-                session::session_create(&socket_path, shell).await?;
+        Command::Session { action } => {
+            let token = match cli.token {
+                Some(t) => t,
+                None => {
+                    let token_path = socket_path.with_extension("token");
+                    std::fs::read_to_string(&token_path).map_err(|e| {
+                        anyhow::anyhow!(
+                            "could not read token from {}: {} (is the daemon running?)",
+                            token_path.display(),
+                            e
+                        )
+                    })?
+                }
+            };
+            match action {
+                SessionAction::Create { shell } => {
+                    session::session_create(&socket_path, &token, shell).await?;
+                }
+                SessionAction::List => {
+                    session::session_list(&socket_path, &token).await?;
+                }
+                SessionAction::Attach { id } => {
+                    session::session_attach(&socket_path, &token, &id).await?;
+                }
+                SessionAction::Kill { id } => {
+                    session::session_kill(&socket_path, &token, &id).await?;
+                }
             }
-            SessionAction::List => {
-                session::session_list(&socket_path).await?;
-            }
-            SessionAction::Attach { id } => {
-                session::session_attach(&socket_path, &id).await?;
-            }
-            SessionAction::Kill { id } => {
-                session::session_kill(&socket_path, &id).await?;
-            }
-        },
+        }
     }
 
     Ok(())
