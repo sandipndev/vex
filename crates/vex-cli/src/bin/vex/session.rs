@@ -1,17 +1,78 @@
 use std::io::Write;
-use std::path::Path;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use anyhow::{Result, bail};
-use tokio::io::{self, AsyncReadExt};
-use tokio::net::UnixStream;
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::net::{TcpStream, UnixStream};
 use uuid::Uuid;
 use vex_cli::proto::{
     ClientMessage, Frame, ServerMessage, read_frame, send_client_message, write_data,
 };
 
-async fn authenticate(
-    reader: &mut tokio::io::ReadHalf<UnixStream>,
-    writer: &mut tokio::io::WriteHalf<UnixStream>,
+#[derive(Clone)]
+pub enum Target {
+    Unix(PathBuf),
+    Tcp(SocketAddr),
+}
+
+enum VexStream {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl AsyncRead for VexStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            VexStream::Unix(s) => Pin::new(s).poll_read(cx, buf),
+            VexStream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for VexStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            VexStream::Unix(s) => Pin::new(s).poll_write(cx, buf),
+            VexStream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            VexStream::Unix(s) => Pin::new(s).poll_flush(cx),
+            VexStream::Tcp(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            VexStream::Unix(s) => Pin::new(s).poll_shutdown(cx),
+            VexStream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+async fn connect(target: &Target) -> Result<VexStream> {
+    match target {
+        Target::Unix(path) => Ok(VexStream::Unix(UnixStream::connect(path).await?)),
+        Target::Tcp(addr) => Ok(VexStream::Tcp(TcpStream::connect(addr).await?)),
+    }
+}
+
+async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
     token: &str,
 ) -> Result<()> {
     send_client_message(
@@ -36,8 +97,8 @@ async fn authenticate(
 }
 
 /// Send a control message and read back a single control response.
-async fn request(socket_path: &Path, token: &str, msg: &ClientMessage) -> Result<ServerMessage> {
-    let stream = UnixStream::connect(socket_path).await?;
+async fn request(target: &Target, token: &str, msg: &ClientMessage) -> Result<ServerMessage> {
+    let stream = connect(target).await?;
     let (mut reader, mut writer) = io::split(stream);
 
     authenticate(&mut reader, &mut writer, token).await?;
@@ -53,8 +114,8 @@ async fn request(socket_path: &Path, token: &str, msg: &ClientMessage) -> Result
     }
 }
 
-pub async fn session_create(socket_path: &Path, token: &str, shell: Option<String>) -> Result<()> {
-    let resp = request(socket_path, token, &ClientMessage::CreateSession { shell }).await?;
+pub async fn session_create(target: &Target, token: &str, shell: Option<String>) -> Result<()> {
+    let resp = request(target, token, &ClientMessage::CreateSession { shell }).await?;
     match resp {
         ServerMessage::SessionCreated { id } => {
             println!("{}", id);
@@ -65,8 +126,8 @@ pub async fn session_create(socket_path: &Path, token: &str, shell: Option<Strin
     }
 }
 
-pub async fn session_list(socket_path: &Path, token: &str) -> Result<()> {
-    let resp = request(socket_path, token, &ClientMessage::ListSessions).await?;
+pub async fn session_list(target: &Target, token: &str) -> Result<()> {
+    let resp = request(target, token, &ClientMessage::ListSessions).await?;
     match resp {
         ServerMessage::Sessions { sessions } => {
             if sessions.is_empty() {
@@ -94,9 +155,9 @@ pub async fn session_list(socket_path: &Path, token: &str) -> Result<()> {
     }
 }
 
-pub async fn session_kill(socket_path: &Path, token: &str, id_prefix: &str) -> Result<()> {
-    let id = resolve_session_id(socket_path, token, id_prefix).await?;
-    let resp = request(socket_path, token, &ClientMessage::KillSession { id }).await?;
+pub async fn session_kill(target: &Target, token: &str, id_prefix: &str) -> Result<()> {
+    let id = resolve_session_id(target, token, id_prefix).await?;
+    let resp = request(target, token, &ClientMessage::KillSession { id }).await?;
     match resp {
         ServerMessage::Error { message } => bail!("{}", message),
         _ => {
@@ -106,10 +167,10 @@ pub async fn session_kill(socket_path: &Path, token: &str, id_prefix: &str) -> R
     }
 }
 
-pub async fn session_attach(socket_path: &Path, token: &str, id_prefix: &str) -> Result<()> {
-    let id = resolve_session_id(socket_path, token, id_prefix).await?;
+pub async fn session_attach(target: &Target, token: &str, id_prefix: &str) -> Result<()> {
+    let id = resolve_session_id(target, token, id_prefix).await?;
 
-    let stream = UnixStream::connect(socket_path).await?;
+    let stream = connect(target).await?;
     let (mut reader, mut writer) = io::split(stream);
 
     // Authenticate first
@@ -242,14 +303,14 @@ pub async fn session_attach(socket_path: &Path, token: &str, id_prefix: &str) ->
     result
 }
 
-async fn resolve_session_id(socket_path: &Path, token: &str, prefix: &str) -> Result<Uuid> {
+async fn resolve_session_id(target: &Target, token: &str, prefix: &str) -> Result<Uuid> {
     // Try parsing as a full UUID first
     if let Ok(id) = prefix.parse::<Uuid>() {
         return Ok(id);
     }
 
     // Otherwise, treat as a prefix and list sessions to find a match
-    let resp = request(socket_path, token, &ClientMessage::ListSessions).await?;
+    let resp = request(target, token, &ClientMessage::ListSessions).await?;
     match resp {
         ServerMessage::Sessions { sessions } => {
             let matches: Vec<_> = sessions
