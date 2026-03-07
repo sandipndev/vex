@@ -414,6 +414,13 @@ attach_via_pty() {
     [[ "$output" == *"killed session"* ]]
 }
 
+@test "tcp: --connect without --token gives clear error" {
+    run "$VEX" --connect "127.0.0.1:9999" session list
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--token"* ]]
+    [[ "$output" == *"VEX_TOKEN"* ]]
+}
+
 @test "tcp: wrong token rejected over TCP" {
     kill "$VEXD_PID" 2>/dev/null || true
     wait "$VEXD_PID" 2>/dev/null || true

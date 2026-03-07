@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 const TAG_CONTROL: u8 = 0x01;
 const TAG_DATA: u8 = 0x02;
+const MAX_FRAME_SIZE: usize = 1_048_576; // 1 MiB
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
@@ -76,6 +77,9 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>
     let len = u32::from_be_bytes(len_buf) as usize;
     if len == 0 {
         bail!("invalid frame: zero length");
+    }
+    if len > MAX_FRAME_SIZE {
+        bail!("frame too large: {} bytes (max {})", len, MAX_FRAME_SIZE);
     }
     let tag = {
         let mut tag_buf = [0u8; 1];
@@ -232,6 +236,18 @@ mod tests {
                 .to_string()
                 .contains("unknown frame tag")
         );
+    }
+
+    #[tokio::test]
+    async fn frame_too_large() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        // Write a frame header claiming 2 MiB payload
+        let len: u32 = 2 * 1024 * 1024;
+        client.write_all(&len.to_be_bytes()).await.unwrap();
+        drop(client);
+        let result = read_frame(&mut server).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("frame too large"));
     }
 
     #[tokio::test]

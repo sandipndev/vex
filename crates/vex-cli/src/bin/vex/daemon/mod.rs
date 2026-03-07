@@ -27,12 +27,8 @@ pub async fn run(socket_path: &Path, listen_addr: Option<SocketAddr>) -> Result<
     let token = Arc::new(Uuid::new_v4().to_string());
     let token_path = socket_path.with_extension("token");
     std::fs::write(&token_path, token.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    info!("auth token written to {}", token_path.display());
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
 
     let unix_listener = UnixListener::bind(socket_path)?;
     info!("vex daemon listening on {}", socket_path.display());
@@ -40,7 +36,8 @@ pub async fn run(socket_path: &Path, listen_addr: Option<SocketAddr>) -> Result<
     let tcp_listener = match listen_addr {
         Some(addr) => {
             let listener = TcpListener::bind(addr).await?;
-            info!("vex daemon listening on tcp://{}", addr);
+            info!("listening on tcp://{}", addr);
+            info!("remote clients: vex --connect {} --token {}", addr, token);
             Some(listener)
         }
         None => None,
