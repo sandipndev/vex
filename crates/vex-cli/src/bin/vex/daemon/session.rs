@@ -19,6 +19,8 @@ pub struct SessionHandle {
     pub pty_writer: Arc<Mutex<pty_process::OwnedWritePty>>,
     pub output_tx: broadcast::Sender<Vec<u8>>,
     pub scrollback: Arc<Mutex<Vec<u8>>>,
+    /// Tracks attached clients and their terminal dimensions.
+    pub clients: HashMap<Uuid, (u16, u16)>,
 }
 
 pub struct SessionManager {
@@ -61,6 +63,7 @@ impl SessionManager {
             pty_writer: Arc::new(Mutex::new(write_pty)),
             output_tx: output_tx.clone(),
             scrollback: Arc::clone(&scrollback),
+            clients: HashMap::new(),
         };
 
         {
@@ -135,6 +138,67 @@ impl SessionManager {
         }
     }
 
+    /// Register a client as attached to a session and recalculate PTY size.
+    pub async fn client_attach(
+        &self,
+        session_id: Uuid,
+        client_id: Uuid,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
+        let mut sessions = self.sessions.lock().await;
+        let h = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
+        h.clients.insert(client_id, (cols, rows));
+        Self::recalculate_size(h).await
+    }
+
+    /// Unregister a client from a session and recalculate PTY size.
+    pub async fn client_detach(&self, session_id: Uuid, client_id: Uuid) {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(h) = sessions.get_mut(&session_id) {
+            h.clients.remove(&client_id);
+            let _ = Self::recalculate_size(h).await;
+        }
+    }
+
+    /// Update a client's terminal dimensions and recalculate PTY size.
+    pub async fn client_resize(
+        &self,
+        session_id: Uuid,
+        client_id: Uuid,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
+        let mut sessions = self.sessions.lock().await;
+        let h = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
+        h.clients.insert(client_id, (cols, rows));
+        Self::recalculate_size(h).await
+    }
+
+    /// Set PTY size to min(cols), min(rows) across all attached clients.
+    /// If no clients are attached, keep the current size.
+    async fn recalculate_size(h: &mut SessionHandle) -> Result<()> {
+        if h.clients.is_empty() {
+            return Ok(());
+        }
+        let cols = h.clients.values().map(|(c, _)| *c).min().unwrap();
+        let rows = h.clients.values().map(|(_, r)| *r).min().unwrap();
+        if cols == h.cols && rows == h.rows {
+            return Ok(());
+        }
+        h.cols = cols;
+        h.rows = rows;
+        let writer = h.pty_writer.lock().await;
+        writer
+            .resize(Size::new(rows, cols))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(())
+    }
+
     pub async fn write_input(&self, id: Uuid, data: &[u8]) -> Result<()> {
         let pty_writer = {
             let sessions = self.sessions.lock().await;
@@ -147,25 +211,6 @@ impl SessionManager {
         let mut writer = pty_writer.lock().await;
         writer.write_all(data).await?;
         writer.flush().await?;
-        Ok(())
-    }
-
-    pub async fn resize_session(&self, id: Uuid, cols: u16, rows: u16) -> Result<()> {
-        let pty_writer = {
-            let mut sessions = self.sessions.lock().await;
-            match sessions.get_mut(&id) {
-                Some(h) => {
-                    h.cols = cols;
-                    h.rows = rows;
-                    Arc::clone(&h.pty_writer)
-                }
-                None => bail!("session not found: {}", id),
-            }
-        };
-        let writer = pty_writer.lock().await;
-        writer
-            .resize(Size::new(rows, cols))
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
     }
 
