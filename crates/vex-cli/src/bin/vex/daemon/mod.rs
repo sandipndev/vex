@@ -1,7 +1,7 @@
 mod handler;
 mod session;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,20 +10,7 @@ use tracing::{error, info};
 
 use session::SessionManager;
 
-fn default_socket_path() -> PathBuf {
-    if let Ok(path) = std::env::var("VEX_SOCKET") {
-        return PathBuf::from(path);
-    }
-    let home = dirs::home_dir().expect("could not determine home directory");
-    home.join(".vex").join("vexd.sock")
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
-    let socket_path = default_socket_path();
-
+pub async fn run(socket_path: &Path) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -31,17 +18,17 @@ async fn main() -> Result<()> {
 
     // Remove stale socket
     if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
+        std::fs::remove_file(socket_path)?;
     }
 
-    let listener = UnixListener::bind(&socket_path)?;
-    info!("vexd listening on {}", socket_path.display());
+    let listener = UnixListener::bind(socket_path)?;
+    info!("vex daemon listening on {}", socket_path.display());
 
     let manager = Arc::new(SessionManager::new());
 
     // Signal handler for graceful shutdown
     let manager_signal = Arc::clone(&manager);
-    let socket_path_signal = socket_path.clone();
+    let socket_path_signal = socket_path.to_owned();
     tokio::spawn(async move {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();

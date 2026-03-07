@@ -11,12 +11,11 @@ setup_file() {
 
 setup() {
     VEX="$BATS_TEST_DIRNAME/../target/debug/vex"
-    VEXD="$BATS_TEST_DIRNAME/../target/debug/vexd"
 
     TEST_TMPDIR="$(mktemp -d)"
     export VEX_SOCKET="$TEST_TMPDIR/vexd.sock"
 
-    "$VEXD" &
+    "$VEX" daemon &
     VEXD_PID=$!
 
     local i

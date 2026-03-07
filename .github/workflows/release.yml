@@ -94,7 +94,7 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.artifact }}.tar.gz vex vexd
+          tar czf ../../../${{ matrix.artifact }}.tar.gz vex
           cd ../../..
 
       - uses: actions/upload-artifact@v6
