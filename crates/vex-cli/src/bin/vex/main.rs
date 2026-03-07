@@ -1,3 +1,4 @@
+mod daemon;
 mod session;
 
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ fn default_socket_path() -> PathBuf {
 }
 
 #[derive(Parser)]
-#[command(name = "vex", about = "Vex terminal multiplexer client")]
+#[command(name = "vex", about = "Vex terminal multiplexer")]
 struct Cli {
     /// Path to the vexd Unix socket
     #[arg(long, env = "VEX_SOCKET")]
@@ -26,6 +27,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Start the daemon
+    Daemon,
     /// Manage sessions
     Session {
         #[command(subcommand)]
@@ -63,6 +66,9 @@ async fn main() -> Result<()> {
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
 
     match cli.command {
+        Command::Daemon => {
+            daemon::run(&socket_path).await?;
+        }
         Command::Session { action } => match action {
             SessionAction::Create { shell } => {
                 session::session_create(&socket_path, shell).await?;

@@ -10,10 +10,6 @@ repository.workspace = true
 name = "vex"
 path = "src/bin/vex/main.rs"
 
-[[bin]]
-name = "vexd"
-path = "src/bin/vexd/main.rs"
-
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 pty-process = { version = "0.5", features = ["async"] }
