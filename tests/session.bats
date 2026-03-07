@@ -42,11 +42,11 @@ UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 # Merge stderr so error messages from anyhow are captured in $output
 vex() { "$VEX" "$@" 2>&1; }
 
-# Poll until session list matches expected pattern (max ~5s)
+# Poll until list matches expected pattern (max ~5s)
 wait_for_no_sessions() {
     local i
     for i in $(seq 1 20); do
-        result=$("$VEX" session list 2>&1)
+        result=$("$VEX" list 2>&1)
         [[ "$result" == *"no active sessions"* ]] && return 0
         sleep 0.25
     done
@@ -59,7 +59,7 @@ wait_for_no_sessions() {
 attach_via_pty() {
     local sid="$1"; shift
     # Remaining args are eval'd in a subshell that feeds stdin
-    ( eval "$@" ) | timeout 5 script -qec "$VEX session attach $sid" /dev/null 2>&1 || true
+    ( eval "$@" ) | timeout 5 script -qec "$VEX attach $sid" /dev/null 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -98,22 +98,22 @@ attach_via_pty() {
 #  Session create
 # ═══════════════════════════════════════════════════════════════════
 
-@test "session create returns a valid UUID" {
-    run "$VEX" session create
+@test "create returns a valid UUID" {
+    run "$VEX" create
     [ "$status" -eq 0 ]
     [[ "$output" =~ $UUID_RE ]]
 }
 
-@test "session create with --shell flag" {
-    run "$VEX" session create --shell /bin/sh
+@test "create with --shell flag" {
+    run "$VEX" create --shell /bin/sh
     [ "$status" -eq 0 ]
     [[ "$output" =~ $UUID_RE ]]
 }
 
-@test "session create returns unique IDs" {
-    run "$VEX" session create
+@test "create returns unique IDs" {
+    run "$VEX" create
     ID1="$output"
-    run "$VEX" session create
+    run "$VEX" create
     ID2="$output"
     [ "$ID1" != "$ID2" ]
 }
@@ -122,17 +122,29 @@ attach_via_pty() {
 #  Session list
 # ═══════════════════════════════════════════════════════════════════
 
-@test "session list: no sessions" {
-    run "$VEX" session list
+@test "list: no sessions" {
+    run "$VEX" list
     [ "$status" -eq 0 ]
     [[ "$output" == *"no active sessions"* ]]
 }
 
-@test "session list: header and session row" {
-    run "$VEX" session create
+@test "bare vex defaults to list" {
+    run "$VEX"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no active sessions"* ]]
+}
+
+@test "ls alias works" {
+    run "$VEX" ls
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no active sessions"* ]]
+}
+
+@test "list: header and session row" {
+    run "$VEX" create
     SID="$output"
 
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -eq 0 ]
     [[ "$output" == *"ID"* ]]
     [[ "$output" == *"COLS"* ]]
@@ -141,22 +153,22 @@ attach_via_pty() {
     [[ "$output" == *"$SID"* ]]
 }
 
-@test "session list: multiple sessions" {
-    run "$VEX" session create
+@test "list: multiple sessions" {
+    run "$VEX" create
     SID1="$output"
-    run "$VEX" session create
+    run "$VEX" create
     SID2="$output"
 
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -eq 0 ]
     [[ "$output" == *"$SID1"* ]]
     [[ "$output" == *"$SID2"* ]]
 }
 
-@test "session list: default dimensions are 80x24" {
-    "$VEX" session create >/dev/null
+@test "list: default dimensions are 80x24" {
+    "$VEX" create >/dev/null
 
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -eq 0 ]
     [[ "$output" == *"80"* ]]
     [[ "$output" == *"24"* ]]
@@ -166,59 +178,59 @@ attach_via_pty() {
 #  Session kill
 # ═══════════════════════════════════════════════════════════════════
 
-@test "session kill by full UUID" {
-    run "$VEX" session create
+@test "kill by full UUID" {
+    run "$VEX" create
     SID="$output"
 
-    run "$VEX" session kill "$SID"
+    run "$VEX" kill "$SID"
     [ "$status" -eq 0 ]
     [[ "$output" == *"killed session"* ]]
 
     wait_for_no_sessions
 }
 
-@test "session kill by UUID prefix" {
-    run "$VEX" session create
+@test "kill by UUID prefix" {
+    run "$VEX" create
     SID="$output"
     PREFIX="${SID:0:8}"
 
-    run "$VEX" session kill "$PREFIX"
+    run "$VEX" kill "$PREFIX"
     [ "$status" -eq 0 ]
     [[ "$output" == *"killed session $SID"* ]]
 }
 
-@test "session kill: nonexistent UUID fails" {
-    run vex session kill "00000000-0000-0000-0000-000000000000"
+@test "kill: nonexistent UUID fails" {
+    run vex kill "00000000-0000-0000-0000-000000000000"
     [ "$status" -ne 0 ]
 }
 
-@test "session kill: no matching prefix fails" {
-    "$VEX" session create >/dev/null
+@test "kill: no matching prefix fails" {
+    "$VEX" create >/dev/null
 
-    run vex session kill "zzzzz"
+    run vex kill "zzzzz"
     [ "$status" -ne 0 ]
     [[ "$output" == *"no session matching"* ]]
 }
 
-@test "session kill: ambiguous prefix fails" {
+@test "kill: ambiguous prefix fails" {
     for _ in $(seq 1 16); do
-        "$VEX" session create >/dev/null
+        "$VEX" create >/dev/null
     done
 
     # Empty prefix matches every session
-    run vex session kill ""
+    run vex kill ""
     [ "$status" -ne 0 ]
     [[ "$output" == *"ambiguous"* ]]
 }
 
 @test "killing all sessions leaves list empty" {
-    run "$VEX" session create
+    run "$VEX" create
     SID1="$output"
-    run "$VEX" session create
+    run "$VEX" create
     SID2="$output"
 
-    "$VEX" session kill "$SID1"
-    "$VEX" session kill "$SID2"
+    "$VEX" kill "$SID1"
+    "$VEX" kill "$SID2"
 
     wait_for_no_sessions
 }
@@ -228,20 +240,20 @@ attach_via_pty() {
 # ═══════════════════════════════════════════════════════════════════
 
 @test "single-char prefix resolves when only one session exists" {
-    run "$VEX" session create
+    run "$VEX" create
     SID="$output"
     PREFIX="${SID:0:1}"
 
-    run "$VEX" session kill "$PREFIX"
+    run "$VEX" kill "$PREFIX"
     [ "$status" -eq 0 ]
 }
 
 @test "4-char prefix resolves to correct session" {
-    run "$VEX" session create
+    run "$VEX" create
     SID="$output"
     PREFIX="${SID:0:4}"
 
-    run "$VEX" session kill "$PREFIX"
+    run "$VEX" kill "$PREFIX"
     [ "$status" -eq 0 ]
     [[ "$output" == *"killed session $SID"* ]]
 }
@@ -251,7 +263,7 @@ attach_via_pty() {
 # ═══════════════════════════════════════════════════════════════════
 
 @test "attach and detach with Ctrl+]" {
-    run "$VEX" session create
+    run "$VEX" create
     [ "$status" -eq 0 ]
     SID="$output"
 
@@ -259,12 +271,12 @@ attach_via_pty() {
     [[ "$OUTPUT" == *"detached"* ]]
 
     # Session should still be alive after detach
-    run "$VEX" session list
+    run "$VEX" list
     [[ "$output" == *"$SID"* ]]
 }
 
 @test "session executes commands and streams output" {
-    run "$VEX" session create --shell /bin/sh
+    run "$VEX" create --shell /bin/sh
     [ "$status" -eq 0 ]
     SID="$output"
 
@@ -273,7 +285,7 @@ attach_via_pty() {
 }
 
 @test "session persists across attach/detach cycles" {
-    run "$VEX" session create --shell /bin/sh
+    run "$VEX" create --shell /bin/sh
     [ "$status" -eq 0 ]
     SID="$output"
 
@@ -298,13 +310,13 @@ attach_via_pty() {
     VEXD_PID=""
     sleep 0.2
 
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -ne 0 ]
 }
 
 @test "client errors with bad socket path" {
     export VEX_SOCKET="/tmp/nonexistent/deep/path/vexd.sock"
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -ne 0 ]
 }
 
@@ -325,7 +337,7 @@ attach_via_pty() {
 }
 
 @test "wrong token is rejected" {
-    run env VEX_TOKEN="bad-token-value" "$VEX" session list
+    run env VEX_TOKEN="bad-token-value" "$VEX" list
     [ "$status" -ne 0 ]
     [[ "$output" == *"invalid token"* ]]
 }
@@ -333,7 +345,7 @@ attach_via_pty() {
 @test "explicit correct token works" {
     TOKEN_PATH="${VEX_SOCKET%.sock}.token"
     TOKEN=$(cat "$TOKEN_PATH")
-    run "$VEX" --token "$TOKEN" session list
+    run "$VEX" --token "$TOKEN" list
     [ "$status" -eq 0 ]
 }
 
@@ -342,22 +354,22 @@ attach_via_pty() {
 # ═══════════════════════════════════════════════════════════════════
 
 @test "daemon serves multiple sequential clients" {
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -eq 0 ]
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -eq 0 ]
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -eq 0 ]
 }
 
 @test "daemon handles rapid session creation" {
     for _ in $(seq 1 5); do
-        run "$VEX" session create
+        run "$VEX" create
         [ "$status" -eq 0 ]
         [[ "$output" =~ $UUID_RE ]]
     done
 
-    run "$VEX" session list
+    run "$VEX" list
     [ "$status" -eq 0 ]
     local count
     count=$(echo "$output" | grep -c '[0-9a-f]\{8\}-')
@@ -365,8 +377,8 @@ attach_via_pty() {
 }
 
 @test "vexd terminates all sessions on shutdown" {
-    "$VEX" session create >/dev/null
-    "$VEX" session create >/dev/null
+    "$VEX" create >/dev/null
+    "$VEX" create >/dev/null
 
     kill "$VEXD_PID"
     wait "$VEXD_PID" 2>/dev/null || true
@@ -380,7 +392,7 @@ attach_via_pty() {
 #  TCP transport
 # ═══════════════════════════════════════════════════════════════════
 
-@test "tcp: session create and list over TCP" {
+@test "tcp: create and list over TCP" {
     # Restart daemon with --listen on a random port
     kill "$VEXD_PID" 2>/dev/null || true
     wait "$VEXD_PID" 2>/dev/null || true
@@ -398,24 +410,24 @@ attach_via_pty() {
     TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
 
     # Create a session via TCP
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" session create
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" create
     [ "$status" -eq 0 ]
     [[ "$output" =~ $UUID_RE ]]
     SID="$output"
 
     # List sessions via TCP
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" session list
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" list
     [ "$status" -eq 0 ]
     [[ "$output" == *"$SID"* ]]
 
     # Kill session via TCP
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" session kill "$SID"
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" kill "$SID"
     [ "$status" -eq 0 ]
     [[ "$output" == *"killed session"* ]]
 }
 
 @test "tcp: --connect without --token gives clear error" {
-    run "$VEX" --connect "127.0.0.1:9999" session list
+    run "$VEX" --connect "127.0.0.1:9999" list
     [ "$status" -ne 0 ]
     [[ "$output" == *"--token"* ]]
     [[ "$output" == *"VEX_TOKEN"* ]]
@@ -435,7 +447,7 @@ attach_via_pty() {
         sleep 0.1
     done
 
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "wrong-token" session list
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "wrong-token" list
     [ "$status" -ne 0 ]
     [[ "$output" == *"invalid token"* ]]
 }
