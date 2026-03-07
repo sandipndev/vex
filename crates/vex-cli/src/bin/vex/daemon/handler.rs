@@ -12,6 +12,12 @@ use vex_cli::proto::{
 
 use super::session::SessionManager;
 
+struct AttachState {
+    session_id: Uuid,
+    output_rx: broadcast::Receiver<Vec<u8>>,
+    event_rx: broadcast::Receiver<ServerMessage>,
+}
+
 pub async fn handle_connection(stream: UnixStream, manager: Arc<SessionManager>) {
     if let Err(e) = handle_connection_inner(stream, &manager).await {
         warn!("connection handler error: {}", e);
@@ -21,13 +27,13 @@ pub async fn handle_connection(stream: UnixStream, manager: Arc<SessionManager>)
 async fn handle_connection_inner(stream: UnixStream, manager: &SessionManager) -> Result<()> {
     let client_id = Uuid::new_v4();
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let mut attached: Option<(Uuid, broadcast::Receiver<Vec<u8>>)> = None;
+    let mut attached: Option<AttachState> = None;
 
     let result = connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
 
     // Ensure we unregister the client on any exit path
-    if let Some((session_id, _)) = attached {
-        manager.client_detach(session_id, client_id).await;
+    if let Some(state) = attached {
+        manager.client_detach(state.session_id, client_id).await;
     }
 
     result
@@ -37,12 +43,13 @@ async fn connection_loop(
     client_id: Uuid,
     reader: &mut tokio::io::ReadHalf<UnixStream>,
     writer: &mut WriteHalf<UnixStream>,
-    attached: &mut Option<(Uuid, broadcast::Receiver<Vec<u8>>)>,
+    attached: &mut Option<AttachState>,
     manager: &SessionManager,
 ) -> Result<()> {
     loop {
-        if let Some((session_id, output_rx)) = attached {
-            // Attached state: select on client frames OR session output
+        if let Some(state) = attached {
+            let session_id = state.session_id;
+            // Attached state: select on client frames, session output, or events
             tokio::select! {
                 frame = read_frame(reader) => {
                     match frame? {
@@ -51,7 +58,7 @@ async fn connection_loop(
                             break;
                         }
                         Some(Frame::Data(data)) => {
-                            if let Err(e) = manager.write_input(*session_id, &data).await {
+                            if let Err(e) = manager.write_input(session_id, &data).await {
                                 warn!("write_input error: {}", e);
                                 send_server_message(
                                     writer,
@@ -59,7 +66,7 @@ async fn connection_loop(
                                         message: format!("session write error: {}", e),
                                     },
                                 ).await?;
-                                manager.client_detach(*session_id, client_id).await;
+                                manager.client_detach(session_id, client_id).await;
                                 *attached = None;
                             }
                         }
@@ -67,8 +74,8 @@ async fn connection_loop(
                             let msg: ClientMessage = serde_json::from_slice(&data)?;
                             match msg {
                                 ClientMessage::DetachSession => {
-                                    info!("client {} detaching from session {}", client_id, *session_id);
-                                    manager.client_detach(*session_id, client_id).await;
+                                    info!("client {} detaching from session {}", client_id, session_id);
+                                    manager.client_detach(session_id, client_id).await;
                                     send_server_message(writer, &ServerMessage::Detached).await?;
                                     *attached = None;
                                 }
@@ -80,8 +87,8 @@ async fn connection_loop(
                                     }
                                 }
                                 ClientMessage::KillSession { id } => {
-                                    if id == *session_id {
-                                        manager.client_detach(*session_id, client_id).await;
+                                    if id == session_id {
+                                        manager.client_detach(session_id, client_id).await;
                                         *attached = None;
                                     }
                                     if let Err(e) = manager.kill_session(id).await {
@@ -102,16 +109,16 @@ async fn connection_loop(
                         }
                     }
                 }
-                output = output_rx.recv() => {
+                output = state.output_rx.recv() => {
                     match output {
                         Ok(data) => {
                             write_data(writer, &data).await?;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!("session {} output closed", session_id);
-                            manager.client_detach(*session_id, client_id).await;
+                            manager.client_detach(session_id, client_id).await;
                             send_server_message(writer, &ServerMessage::SessionEnded {
-                                id: *session_id,
+                                id: session_id,
                                 exit_code: None,
                             }).await?;
                             *attached = None;
@@ -119,6 +126,15 @@ async fn connection_loop(
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!("output lagged by {} messages for session {}", n, session_id);
                         }
+                    }
+                }
+                event = state.event_rx.recv() => {
+                    match event {
+                        Ok(msg) => {
+                            send_server_message(writer, &msg).await?;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
                     }
                 }
             }
@@ -134,6 +150,7 @@ async fn connection_loop(
                     if let ClientMessage::AttachSession { id } = msg {
                         match manager.attach_session(id).await {
                             Ok((scrollback, output_rx)) => {
+                                let event_rx = manager.subscribe_events(id).await?;
                                 // Register client with default size; the client
                                 // sends a ResizeSession immediately after attach.
                                 let _ = manager.client_attach(id, client_id, 80, 24).await;
@@ -142,7 +159,11 @@ async fn connection_loop(
                                 if !scrollback.is_empty() {
                                     write_data(writer, &scrollback).await?;
                                 }
-                                *attached = Some((id, output_rx));
+                                *attached = Some(AttachState {
+                                    session_id: id,
+                                    output_rx,
+                                    event_rx,
+                                });
                             }
                             Err(e) => {
                                 send_server_message(

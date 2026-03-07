@@ -7,7 +7,7 @@ use pty_process::Size;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
-use vex_cli::proto::SessionInfo;
+use vex_cli::proto::{ServerMessage, SessionInfo};
 
 const MAX_SCROLLBACK: usize = 64 * 1024;
 
@@ -21,6 +21,8 @@ pub struct SessionHandle {
     pub scrollback: Arc<Mutex<Vec<u8>>>,
     /// Tracks attached clients and their terminal dimensions.
     pub clients: HashMap<Uuid, (u16, u16)>,
+    /// Channel for presence events (ClientJoined/ClientLeft).
+    pub event_tx: broadcast::Sender<ServerMessage>,
 }
 
 pub struct SessionManager {
@@ -53,6 +55,7 @@ impl SessionManager {
         let (read_pty, write_pty) = pty.into_split();
         let (output_tx, _) = broadcast::channel(256);
         let scrollback = Arc::new(Mutex::new(Vec::new()));
+        let (event_tx, _) = broadcast::channel(16);
 
         let id = Uuid::new_v4();
         let handle = SessionHandle {
@@ -64,6 +67,7 @@ impl SessionManager {
             output_tx: output_tx.clone(),
             scrollback: Arc::clone(&scrollback),
             clients: HashMap::new(),
+            event_tx,
         };
 
         {
@@ -116,6 +120,7 @@ impl SessionManager {
                 cols: h.cols,
                 rows: h.rows,
                 created_at: h.created_at,
+                client_count: h.clients.len(),
             })
             .collect()
     }
@@ -138,6 +143,14 @@ impl SessionManager {
         }
     }
 
+    pub async fn subscribe_events(&self, id: Uuid) -> Result<broadcast::Receiver<ServerMessage>> {
+        let sessions = self.sessions.lock().await;
+        match sessions.get(&id) {
+            Some(h) => Ok(h.event_tx.subscribe()),
+            None => bail!("session not found: {}", id),
+        }
+    }
+
     /// Register a client as attached to a session and recalculate PTY size.
     pub async fn client_attach(
         &self,
@@ -151,6 +164,10 @@ impl SessionManager {
             .get_mut(&session_id)
             .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
         h.clients.insert(client_id, (cols, rows));
+        let _ = h.event_tx.send(ServerMessage::ClientJoined {
+            session_id,
+            client_id,
+        });
         Self::recalculate_size(h).await
     }
 
@@ -159,6 +176,10 @@ impl SessionManager {
         let mut sessions = self.sessions.lock().await;
         if let Some(h) = sessions.get_mut(&session_id) {
             h.clients.remove(&client_id);
+            let _ = h.event_tx.send(ServerMessage::ClientLeft {
+                session_id,
+                client_id,
+            });
             let _ = Self::recalculate_size(h).await;
         }
     }
