@@ -301,7 +301,17 @@ pub async fn session_attach(target: &Target, token: &str, id_prefix: &str) -> Re
     stdin_handle.abort();
     sigwinch_handle.abort();
 
-    result
+    // Restore terminal before exiting
+    drop(_raw_guard);
+
+    // tokio::io::stdin() uses a blocking thread that can't be interrupted
+    // by abort(). Without this, the runtime hangs on shutdown until the
+    // user presses another key.
+    if let Err(e) = &result {
+        eprintln!("error: {:#}", e);
+        std::process::exit(1);
+    }
+    std::process::exit(0);
 }
 
 async fn resolve_session_id(target: &Target, token: &str, prefix: &str) -> Result<Uuid> {
