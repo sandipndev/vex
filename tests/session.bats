@@ -433,6 +433,115 @@ attach_via_pty() {
     [[ "$output" == *"killed session"* ]]
 }
 
+# ═══════════════════════════════════════════════════════════════════
+#  Connect / Disconnect
+# ═══════════════════════════════════════════════════════════════════
+
+@test "connect: saves connection and subsequent commands use it" {
+    # Restart daemon with TCP listener
+    kill "$VEXD_PID" 2>/dev/null || true
+    wait "$VEXD_PID" 2>/dev/null || true
+
+    TCP_PORT=$((20000 + RANDOM % 10000))
+    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
+    VEXD_PID=$!
+
+    local i
+    for i in $(seq 1 50); do
+        [ -S "$VEX_SOCKET" ] && break
+        sleep 0.1
+    done
+
+    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
+
+    # Save connection
+    run "$VEX" connect "127.0.0.1:$TCP_PORT" --token "$TOKEN"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"verified"* ]]
+
+    # List without --connect/--token should work via saved connection
+    run "$VEX" list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no active sessions"* ]]
+
+    # Create should also work
+    run "$VEX" create
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ $UUID_RE ]]
+}
+
+@test "connect: saves even when daemon is unreachable" {
+    run "$VEX" connect "127.0.0.1:1" --token "sometoken"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unverified"* ]]
+
+    # Clean up so it doesn't affect other tests
+    "$VEX" disconnect
+}
+
+@test "disconnect: reverts to local daemon" {
+    # Restart daemon with TCP listener
+    kill "$VEXD_PID" 2>/dev/null || true
+    wait "$VEXD_PID" 2>/dev/null || true
+
+    TCP_PORT=$((20000 + RANDOM % 10000))
+    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
+    VEXD_PID=$!
+
+    local i
+    for i in $(seq 1 50); do
+        [ -S "$VEX_SOCKET" ] && break
+        sleep 0.1
+    done
+
+    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
+
+    # Save and then remove
+    "$VEX" connect "127.0.0.1:$TCP_PORT" --token "$TOKEN"
+    run "$VEX" disconnect
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"disconnected"* ]]
+
+    # Should still work via local socket
+    run "$VEX" list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no active sessions"* ]]
+}
+
+@test "disconnect: no-op when not connected" {
+    run "$VEX" disconnect
+    [ "$status" -eq 0 ]
+}
+
+@test "connect: --connect flag overrides saved connection" {
+    # Restart daemon with TCP listener
+    kill "$VEXD_PID" 2>/dev/null || true
+    wait "$VEXD_PID" 2>/dev/null || true
+
+    TCP_PORT=$((20000 + RANDOM % 10000))
+    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
+    VEXD_PID=$!
+
+    local i
+    for i in $(seq 1 50); do
+        [ -S "$VEX_SOCKET" ] && break
+        sleep 0.1
+    done
+
+    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
+
+    # Save a bogus connection
+    "$VEX" connect "127.0.0.1:1" --token "bad"
+
+    # Explicit --connect should override the saved one
+    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no active sessions"* ]]
+
+    # Clean up
+    "$VEX" disconnect
+}
+
 @test "tcp: --connect without --token gives clear error" {
     run "$VEX" --connect "127.0.0.1:9999" list
     [ "$status" -ne 0 ]
