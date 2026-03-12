@@ -11,10 +11,9 @@ const MAX_FRAME_SIZE: usize = 1_048_576; // 1 MiB
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
-    Authenticate { token: String },
     CreateSession { shell: Option<String> },
     ListSessions,
-    AttachSession { id: Uuid },
+    AttachSession { id: Uuid, cols: u16, rows: u16 },
     DetachSession,
     ResizeSession { id: Uuid, cols: u16, rows: u16 },
     KillSession { id: Uuid },
@@ -23,7 +22,6 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
-    Authenticated,
     SessionCreated { id: Uuid },
     Sessions { sessions: Vec<SessionInfo> },
     Attached { id: Uuid },
@@ -123,14 +121,15 @@ mod tests {
     #[test]
     fn serde_round_trip_client() {
         let msgs = vec![
-            ClientMessage::Authenticate {
-                token: "test-token".into(),
-            },
             ClientMessage::CreateSession {
                 shell: Some("bash".into()),
             },
             ClientMessage::ListSessions,
-            ClientMessage::AttachSession { id: Uuid::nil() },
+            ClientMessage::AttachSession {
+                id: Uuid::nil(),
+                cols: 120,
+                rows: 40,
+            },
             ClientMessage::DetachSession,
             ClientMessage::ResizeSession {
                 id: Uuid::nil(),
@@ -149,7 +148,6 @@ mod tests {
     #[test]
     fn serde_round_trip_server() {
         let msgs = vec![
-            ServerMessage::Authenticated,
             ServerMessage::SessionCreated { id: Uuid::nil() },
             ServerMessage::Sessions {
                 sessions: vec![SessionInfo {

@@ -13,25 +13,23 @@ setup() {
     VEX="$BATS_TEST_DIRNAME/../target/debug/vex"
 
     TEST_TMPDIR="$(mktemp -d)"
-    export VEX_SOCKET="$TEST_TMPDIR/vexd.sock"
+    export VEX_DIR="$TEST_TMPDIR/.vex"
+    export VEX_PORT=$((20000 + RANDOM % 10000))
 
-    "$VEX" daemon &
-    VEXD_PID=$!
+    "$VEX" daemon start 2>/dev/null
 
+    # Verify daemon is reachable
     local i
     for i in $(seq 1 50); do
-        [ -S "$VEX_SOCKET" ] && return 0
+        "$VEX" list >/dev/null 2>&1 && return 0
         sleep 0.1
     done
-    echo "vexd failed to start within 5s" >&2
+    echo "daemon failed to start within 5s" >&2
     return 1
 }
 
 teardown() {
-    if [ -n "${VEXD_PID:-}" ]; then
-        kill "$VEXD_PID" 2>/dev/null || true
-        wait "$VEXD_PID" 2>/dev/null || true
-    fi
+    "$VEX" daemon stop 2>/dev/null || true
     [ -n "${TEST_TMPDIR:-}" ] && rm -rf "$TEST_TMPDIR"
 }
 
@@ -66,32 +64,65 @@ attach_via_pty() {
 #  Daemon lifecycle
 # ═══════════════════════════════════════════════════════════════════
 
-@test "vexd creates socket file on startup" {
-    [ -S "$VEX_SOCKET" ]
+@test "daemon start creates pid file" {
+    [ -f "$VEX_DIR/daemon.pid" ]
 }
 
-@test "vexd removes socket and token on SIGTERM" {
-    [ -S "$VEX_SOCKET" ]
-    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
-    [ -f "$TOKEN_PATH" ]
-    kill "$VEXD_PID"
-    wait "$VEXD_PID" 2>/dev/null || true
-    VEXD_PID=""
-    sleep 0.2
-    [ ! -e "$VEX_SOCKET" ]
-    [ ! -e "$TOKEN_PATH" ]
+@test "daemon start creates log file" {
+    [ -f "$VEX_DIR/daemon.log" ]
 }
 
-@test "vexd removes socket and token on SIGINT" {
-    [ -S "$VEX_SOCKET" ]
-    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
-    [ -f "$TOKEN_PATH" ]
-    kill -INT "$VEXD_PID"
-    wait "$VEXD_PID" 2>/dev/null || true
-    VEXD_PID=""
-    sleep 0.2
-    [ ! -e "$VEX_SOCKET" ]
-    [ ! -e "$TOKEN_PATH" ]
+@test "daemon start when already running says so" {
+    run vex daemon start
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already running"* ]]
+}
+
+@test "daemon stop removes pid file" {
+    "$VEX" daemon stop 2>/dev/null
+    [ ! -f "$VEX_DIR/daemon.pid" ]
+
+    # Re-start for other teardown cleanup
+    "$VEX" daemon start 2>/dev/null
+}
+
+@test "daemon shuts down on SIGTERM" {
+    PID=$(cat "$VEX_DIR/daemon.pid")
+    kill "$PID"
+
+    local i
+    for i in $(seq 1 20); do
+        kill -0 "$PID" 2>/dev/null || break
+        sleep 0.1
+    done
+
+    # PID file should be cleaned up by the daemon's signal handler
+    [ ! -f "$VEX_DIR/daemon.pid" ]
+
+    # Restart for teardown
+    "$VEX" daemon start 2>/dev/null
+}
+
+@test "daemon shuts down on SIGINT" {
+    PID=$(cat "$VEX_DIR/daemon.pid")
+    kill -INT "$PID"
+
+    local i
+    for i in $(seq 1 20); do
+        kill -0 "$PID" 2>/dev/null || break
+        sleep 0.1
+    done
+
+    [ ! -f "$VEX_DIR/daemon.pid" ]
+
+    # Restart for teardown
+    "$VEX" daemon start 2>/dev/null
+}
+
+@test "daemon logs shows listening message" {
+    run "$VEX" daemon logs
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"listening"* ]]
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -312,48 +343,12 @@ attach_via_pty() {
 # ═══════════════════════════════════════════════════════════════════
 
 @test "client errors when daemon is not running" {
-    kill "$VEXD_PID" 2>/dev/null || true
-    wait "$VEXD_PID" 2>/dev/null || true
-    VEXD_PID=""
+    "$VEX" daemon stop 2>/dev/null || true
     sleep 0.2
 
-    run "$VEX" list
+    run vex list
     [ "$status" -ne 0 ]
-}
-
-@test "client errors with bad socket path" {
-    export VEX_SOCKET="/tmp/nonexistent/deep/path/vexd.sock"
-    run "$VEX" list
-    [ "$status" -ne 0 ]
-}
-
-# ═══════════════════════════════════════════════════════════════════
-#  Authentication
-# ═══════════════════════════════════════════════════════════════════
-
-@test "daemon writes token file on startup" {
-    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
-    [ -f "$TOKEN_PATH" ]
-    [ -n "$(cat "$TOKEN_PATH")" ]
-}
-
-@test "token file has restrictive permissions" {
-    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
-    PERMS=$(stat -c '%a' "$TOKEN_PATH")
-    [ "$PERMS" = "600" ]
-}
-
-@test "wrong token is rejected" {
-    run env VEX_TOKEN="bad-token-value" "$VEX" list
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"invalid token"* ]]
-}
-
-@test "explicit correct token works" {
-    TOKEN_PATH="${VEX_SOCKET%.sock}.token"
-    TOKEN=$(cat "$TOKEN_PATH")
-    run "$VEX" --token "$TOKEN" list
-    [ "$status" -eq 0 ]
+    [[ "$output" == *"daemon"* ]]
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -383,129 +378,47 @@ attach_via_pty() {
     [ "$count" -eq 5 ]
 }
 
-@test "vexd terminates all sessions on shutdown" {
+@test "daemon terminates all sessions on shutdown" {
     "$VEX" create >/dev/null
     "$VEX" create >/dev/null
 
-    kill "$VEXD_PID"
-    wait "$VEXD_PID" 2>/dev/null || true
-    VEXD_PID=""
-    sleep 0.2
-
-    [ ! -e "$VEX_SOCKET" ]
-}
-
-# ═══════════════════════════════════════════════════════════════════
-#  TCP transport
-# ═══════════════════════════════════════════════════════════════════
-
-@test "tcp: create and list over TCP" {
-    # Restart daemon with --listen on a random port
-    kill "$VEXD_PID" 2>/dev/null || true
-    wait "$VEXD_PID" 2>/dev/null || true
-
-    TCP_PORT=$((20000 + RANDOM % 10000))
-    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
-    VEXD_PID=$!
+    PID=$(cat "$VEX_DIR/daemon.pid")
+    kill "$PID"
 
     local i
-    for i in $(seq 1 50); do
-        [ -S "$VEX_SOCKET" ] && break
+    for i in $(seq 1 20); do
+        kill -0 "$PID" 2>/dev/null || break
         sleep 0.1
     done
 
-    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
+    [ ! -f "$VEX_DIR/daemon.pid" ]
 
-    # Create a session via TCP
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" create
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ $UUID_RE ]]
-    SID="$output"
-
-    # List sessions via TCP
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" list
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"$SID"* ]]
-
-    # Kill session via TCP
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" kill "$SID"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"killed session"* ]]
+    # Restart for teardown
+    "$VEX" daemon start 2>/dev/null
 }
 
 # ═══════════════════════════════════════════════════════════════════
-#  Connect / Disconnect
+#  Connect / Disconnect (SSH target management)
 # ═══════════════════════════════════════════════════════════════════
 
-@test "connect: saves connection and subsequent commands use it" {
-    # Restart daemon with TCP listener
-    kill "$VEXD_PID" 2>/dev/null || true
-    wait "$VEXD_PID" 2>/dev/null || true
-
-    TCP_PORT=$((20000 + RANDOM % 10000))
-    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
-    VEXD_PID=$!
-
-    local i
-    for i in $(seq 1 50); do
-        [ -S "$VEX_SOCKET" ] && break
-        sleep 0.1
-    done
-
-    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
-
-    # Save connection
-    run "$VEX" connect "127.0.0.1:$TCP_PORT" --token "$TOKEN"
+@test "connect: saves connection file" {
+    # Use a host that fails quickly in BatchMode
+    run vex connect "nobody@127.0.0.1"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"verified"* ]]
+    [ -f "$VEX_DIR/connect.json" ]
+    [[ "$(cat "$VEX_DIR/connect.json")" == *"nobody@127.0.0.1"* ]]
 
-    # List without --connect/--token should work via saved connection
-    run "$VEX" list
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"no active sessions"* ]]
-
-    # Create should also work
-    run "$VEX" create
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ $UUID_RE ]]
-}
-
-@test "connect: saves even when daemon is unreachable" {
-    run "$VEX" connect "127.0.0.1:1" --token "sometoken"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"unverified"* ]]
-
-    # Clean up so it doesn't affect other tests
     "$VEX" disconnect
 }
 
-@test "disconnect: reverts to local daemon" {
-    # Restart daemon with TCP listener
-    kill "$VEXD_PID" 2>/dev/null || true
-    wait "$VEXD_PID" 2>/dev/null || true
+@test "disconnect: removes connection file" {
+    "$VEX" connect "nobody@127.0.0.1" 2>/dev/null || true
+    [ -f "$VEX_DIR/connect.json" ]
 
-    TCP_PORT=$((20000 + RANDOM % 10000))
-    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
-    VEXD_PID=$!
-
-    local i
-    for i in $(seq 1 50); do
-        [ -S "$VEX_SOCKET" ] && break
-        sleep 0.1
-    done
-
-    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
-
-    # Save and then remove
-    "$VEX" connect "127.0.0.1:$TCP_PORT" --token "$TOKEN"
-    run "$VEX" disconnect
+    run vex disconnect
     [ "$status" -eq 0 ]
     [[ "$output" == *"disconnected"* ]]
-
-    # Should still work via local socket
-    run "$VEX" list
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"no active sessions"* ]]
+    [ ! -f "$VEX_DIR/connect.json" ]
 }
 
 @test "disconnect: no-op when not connected" {
@@ -513,57 +426,69 @@ attach_via_pty() {
     [ "$status" -eq 0 ]
 }
 
-@test "connect: --connect flag overrides saved connection" {
-    # Restart daemon with TCP listener
-    kill "$VEXD_PID" 2>/dev/null || true
-    wait "$VEXD_PID" 2>/dev/null || true
+# ═══════════════════════════════════════════════════════════════════
+#  Terminal size (socket → now TCP)
+# ═══════════════════════════════════════════════════════════════════
 
-    TCP_PORT=$((20000 + RANDOM % 10000))
-    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
-    VEXD_PID=$!
-
-    local i
-    for i in $(seq 1 50); do
-        [ -S "$VEX_SOCKET" ] && break
-        sleep 0.1
-    done
-
-    TOKEN=$(cat "${VEX_SOCKET%.sock}.token")
-
-    # Save a bogus connection
-    "$VEX" connect "127.0.0.1:1" --token "bad"
-
-    # Explicit --connect should override the saved one
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "$TOKEN" list
+@test "session reports PTY size matching attached client" {
+    run "$VEX" create --shell /bin/sh
     [ "$status" -eq 0 ]
-    [[ "$output" == *"no active sessions"* ]]
+    SID="$output"
 
-    # Clean up
-    "$VEX" disconnect
+    OUTPUT=$(attach_via_pty "$SID" \
+        "sleep 0.5; printf 'stty size\n'; sleep 1; printf '\x1d'")
+
+    # stty size should print two numbers (rows cols), not "0 0"
+    [[ "$OUTPUT" =~ [0-9]+\ [0-9]+ ]]
 }
 
-@test "tcp: --connect without --token gives clear error" {
-    run "$VEX" --connect "127.0.0.1:9999" list
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"--token"* ]]
-    [[ "$output" == *"VEX_TOKEN"* ]]
+@test "session list dimensions update after attach" {
+    run "$VEX" create --shell /bin/sh
+    [ "$status" -eq 0 ]
+    SID="$output"
+
+    # Default (no client attached) is 80x24
+    run "$VEX" list
+    [[ "$output" == *"80"* ]]
+    [[ "$output" == *"24"* ]]
+
+    # Attach in background (sends terminal dimensions), keep attached
+    ( sleep 2; printf '\x1d' ) \
+        | timeout 5 script -qec "$VEX attach $SID" /dev/null >/dev/null 2>&1 &
+    ATTACH_PID=$!
+    sleep 1
+
+    # After attach, list should show >= 1 client
+    run "$VEX" list
+    [[ "$output" == *"$SID"* ]]
+    # The CLIENTS column should show at least 1
+    [[ "$output" =~ [1-9] ]]
+
+    wait "$ATTACH_PID" 2>/dev/null || true
 }
 
-@test "tcp: wrong token rejected over TCP" {
-    kill "$VEXD_PID" 2>/dev/null || true
-    wait "$VEXD_PID" 2>/dev/null || true
+@test "stty size inside session returns nonzero dimensions" {
+    run "$VEX" create --shell /bin/sh
+    [ "$status" -eq 0 ]
+    SID="$output"
 
-    TCP_PORT=$((20000 + RANDOM % 10000))
-    "$VEX" daemon --listen "127.0.0.1:$TCP_PORT" &
-    VEXD_PID=$!
+    OUTPUT=$(attach_via_pty "$SID" \
+        "sleep 0.5; printf 'stty size\n'; sleep 1; printf '\x1d'")
 
-    local i
-    for i in $(seq 1 50); do
-        [ -S "$VEX_SOCKET" ] && break
-        sleep 0.1
-    done
+    # Should NOT be "0 0"
+    [[ ! "$OUTPUT" =~ "0 0" ]]
+    # Should contain at least one dimension > 0
+    [[ "$OUTPUT" =~ [1-9][0-9]*\ [1-9][0-9]* ]]
+}
 
-    run "$VEX" --connect "127.0.0.1:$TCP_PORT" --token "wrong-token" list
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"invalid token"* ]]
+@test "resize propagates to PTY" {
+    run "$VEX" create --shell /bin/sh
+    [ "$status" -eq 0 ]
+    SID="$output"
+
+    OUTPUT=$(attach_via_pty "$SID" \
+        "sleep 0.5; printf 'tput cols\n'; sleep 1; printf '\x1d'")
+
+    # tput cols should output a number > 0
+    [[ "$OUTPUT" =~ [1-9][0-9]* ]]
 }

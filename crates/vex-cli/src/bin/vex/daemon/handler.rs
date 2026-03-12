@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 use vex_cli::proto::{
     ClientMessage, Frame, ServerMessage, read_frame, send_server_message, write_data,
@@ -20,9 +20,8 @@ struct AttachState {
 pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     manager: Arc<SessionManager>,
-    token: Arc<String>,
 ) {
-    if let Err(e) = handle_connection_inner(stream, &manager, &token).await {
+    if let Err(e) = handle_connection_inner(stream, &manager).await {
         warn!("connection handler error: {}", e);
     }
 }
@@ -30,58 +29,13 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'stati
 async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     manager: &SessionManager,
-    token: &str,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
     let (mut reader, mut writer) = tokio::io::split(stream);
 
-    // First frame must be Authenticate
-    match read_frame(&mut reader).await? {
-        Some(Frame::Control(data)) => {
-            let msg: ClientMessage = serde_json::from_slice(&data)?;
-            match msg {
-                ClientMessage::Authenticate {
-                    token: client_token,
-                } => {
-                    if client_token != token {
-                        send_server_message(
-                            &mut writer,
-                            &ServerMessage::Error {
-                                message: "invalid token".into(),
-                            },
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                    send_server_message(&mut writer, &ServerMessage::Authenticated).await?;
-                }
-                _ => {
-                    send_server_message(
-                        &mut writer,
-                        &ServerMessage::Error {
-                            message: "authentication required".into(),
-                        },
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            }
-        }
-        Some(Frame::Data(_)) => {
-            send_server_message(
-                &mut writer,
-                &ServerMessage::Error {
-                    message: "authentication required".into(),
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-        None => return Ok(()),
-    }
-
     let mut attached: Option<AttachState> = None;
-    let result = connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
+    let result =
+        connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
 
     // Ensure we unregister the client on any exit path
     if let Some(state) = attached {
@@ -199,13 +153,11 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
                 Some(Frame::Control(data)) => {
                     let msg: ClientMessage = serde_json::from_slice(&data)?;
-                    if let ClientMessage::AttachSession { id } = msg {
+                    if let ClientMessage::AttachSession { id, cols, rows } = msg {
                         match manager.attach_session(id).await {
                             Ok((scrollback, output_rx)) => {
                                 let event_rx = manager.subscribe_events(id).await?;
-                                // Register client with default size; the client
-                                // sends a ResizeSession immediately after attach.
-                                let _ = manager.client_attach(id, client_id, 80, 24).await;
+                                let _ = manager.client_attach(id, client_id, cols, rows).await;
                                 send_server_message(writer, &ServerMessage::Attached { id })
                                     .await?;
                                 if !scrollback.is_empty() {
@@ -260,7 +212,7 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                     send_server_message(writer, &ServerMessage::SessionCreated { id }).await?;
                 }
                 Err(e) => {
-                    error!("create session error: {}", e);
+                    tracing::error!("create session error: {}", e);
                     send_server_message(
                         writer,
                         &ServerMessage::Error {
@@ -315,15 +267,6 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
         }
         ClientMessage::AttachSession { .. } => {
             // Handled in the main loop
-        }
-        ClientMessage::Authenticate { .. } => {
-            send_server_message(
-                writer,
-                &ServerMessage::Error {
-                    message: "already authenticated".into(),
-                },
-            )
-            .await?;
         }
     }
     Ok(())

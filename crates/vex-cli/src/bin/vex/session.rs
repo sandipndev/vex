@@ -1,107 +1,27 @@
 use std::io::Write;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use anyhow::{Result, bail};
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::io::{self, AsyncReadExt};
+use tokio::net::TcpStream;
 use uuid::Uuid;
 use vex_cli::proto::{
     ClientMessage, Frame, ServerMessage, read_frame, send_client_message, write_data,
 };
 
-#[derive(Clone)]
-pub enum Target {
-    Unix(PathBuf),
-    Tcp(SocketAddr),
+async fn connect(port: u16) -> Result<TcpStream> {
+    TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| {
+        anyhow::anyhow!(
+            "could not connect to daemon on port {}: {} (is the daemon running?)",
+            port,
+            e
+        )
+    })
 }
 
-enum VexStream {
-    Unix(UnixStream),
-    Tcp(TcpStream),
-}
-
-impl AsyncRead for VexStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            VexStream::Unix(s) => Pin::new(s).poll_read(cx, buf),
-            VexStream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for VexStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            VexStream::Unix(s) => Pin::new(s).poll_write(cx, buf),
-            VexStream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            VexStream::Unix(s) => Pin::new(s).poll_flush(cx),
-            VexStream::Tcp(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            VexStream::Unix(s) => Pin::new(s).poll_shutdown(cx),
-            VexStream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
-
-async fn connect(target: &Target) -> Result<VexStream> {
-    match target {
-        Target::Unix(path) => Ok(VexStream::Unix(UnixStream::connect(path).await?)),
-        Target::Tcp(addr) => Ok(VexStream::Tcp(TcpStream::connect(addr).await?)),
-    }
-}
-
-async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    reader: &mut R,
-    writer: &mut W,
-    token: &str,
-) -> Result<()> {
-    send_client_message(
-        writer,
-        &ClientMessage::Authenticate {
-            token: token.to_string(),
-        },
-    )
-    .await?;
-    match read_frame(reader).await? {
-        Some(Frame::Control(data)) => {
-            let resp: ServerMessage = serde_json::from_slice(&data)?;
-            match resp {
-                ServerMessage::Authenticated => Ok(()),
-                ServerMessage::Error { message } => bail!("{}", message),
-                other => bail!("unexpected response: {:?}", other),
-            }
-        }
-        Some(Frame::Data(_)) => bail!("unexpected data frame"),
-        None => bail!("server closed connection"),
-    }
-}
-
-/// Send a control message and read back a single control response.
-async fn request(target: &Target, token: &str, msg: &ClientMessage) -> Result<ServerMessage> {
-    let stream = connect(target).await?;
+async fn request(port: u16, msg: &ClientMessage) -> Result<ServerMessage> {
+    let stream = connect(port).await?;
     let (mut reader, mut writer) = io::split(stream);
 
-    authenticate(&mut reader, &mut writer, token).await?;
     send_client_message(&mut writer, msg).await?;
 
     match read_frame(&mut reader).await? {
@@ -114,8 +34,8 @@ async fn request(target: &Target, token: &str, msg: &ClientMessage) -> Result<Se
     }
 }
 
-pub async fn session_create(target: &Target, token: &str, shell: Option<String>) -> Result<String> {
-    let resp = request(target, token, &ClientMessage::CreateSession { shell }).await?;
+pub async fn session_create(port: u16, shell: Option<String>) -> Result<String> {
+    let resp = request(port, &ClientMessage::CreateSession { shell }).await?;
     match resp {
         ServerMessage::SessionCreated { id } => {
             let id_str = id.to_string();
@@ -127,8 +47,8 @@ pub async fn session_create(target: &Target, token: &str, shell: Option<String>)
     }
 }
 
-pub async fn session_list(target: &Target, token: &str) -> Result<()> {
-    let resp = request(target, token, &ClientMessage::ListSessions).await?;
+pub async fn session_list(port: u16) -> Result<()> {
+    let resp = request(port, &ClientMessage::ListSessions).await?;
     match resp {
         ServerMessage::Sessions { sessions } => {
             if sessions.is_empty() {
@@ -156,9 +76,9 @@ pub async fn session_list(target: &Target, token: &str) -> Result<()> {
     }
 }
 
-pub async fn session_kill(target: &Target, token: &str, id_prefix: &str) -> Result<()> {
-    let id = resolve_session_id(target, token, id_prefix).await?;
-    let resp = request(target, token, &ClientMessage::KillSession { id }).await?;
+pub async fn session_kill(port: u16, id_prefix: &str) -> Result<()> {
+    let id = resolve_session_id(port, id_prefix).await?;
+    let resp = request(port, &ClientMessage::KillSession { id }).await?;
     match resp {
         ServerMessage::Error { message } => bail!("{}", message),
         _ => {
@@ -168,17 +88,23 @@ pub async fn session_kill(target: &Target, token: &str, id_prefix: &str) -> Resu
     }
 }
 
-pub async fn session_attach(target: &Target, token: &str, id_prefix: &str) -> Result<()> {
-    let id = resolve_session_id(target, token, id_prefix).await?;
+pub async fn session_attach(port: u16, id_prefix: &str) -> Result<()> {
+    let id = resolve_session_id(port, id_prefix).await?;
 
-    let stream = connect(target).await?;
+    let stream = connect(port).await?;
     let (mut reader, mut writer) = io::split(stream);
 
-    // Authenticate first
-    authenticate(&mut reader, &mut writer, token).await?;
+    // Detect terminal size for the attach request
+    let (cols, rows) = terminal_size::terminal_size()
+        .map(|(w, h)| (w.0, h.0))
+        .unwrap_or((80, 24));
 
-    // Send attach request
-    send_client_message(&mut writer, &ClientMessage::AttachSession { id }).await?;
+    // Send attach request with terminal dimensions
+    send_client_message(
+        &mut writer,
+        &ClientMessage::AttachSession { id, cols, rows },
+    )
+    .await?;
 
     // Wait for Attached confirmation
     match read_frame(&mut reader).await? {
@@ -191,17 +117,6 @@ pub async fn session_attach(target: &Target, token: &str, id_prefix: &str) -> Re
             }
         }
         _ => bail!("unexpected response from server"),
-    }
-
-    // Send current terminal size
-    if let Some((terminal_size::Width(cols), terminal_size::Height(rows))) =
-        terminal_size::terminal_size()
-    {
-        send_client_message(
-            &mut writer,
-            &ClientMessage::ResizeSession { id, cols, rows },
-        )
-        .await?;
     }
 
     // Enter raw mode
@@ -314,14 +229,14 @@ pub async fn session_attach(target: &Target, token: &str, id_prefix: &str) -> Re
     std::process::exit(0);
 }
 
-async fn resolve_session_id(target: &Target, token: &str, prefix: &str) -> Result<Uuid> {
+async fn resolve_session_id(port: u16, prefix: &str) -> Result<Uuid> {
     // Try parsing as a full UUID first
     if let Ok(id) = prefix.parse::<Uuid>() {
         return Ok(id);
     }
 
     // Otherwise, treat as a prefix and list sessions to find a match
-    let resp = request(target, token, &ClientMessage::ListSessions).await?;
+    let resp = request(port, &ClientMessage::ListSessions).await?;
     match resp {
         ServerMessage::Sessions { sessions } => {
             let matches: Vec<_> = sessions

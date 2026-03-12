@@ -1,54 +1,24 @@
 mod handler;
 mod session;
 
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tracing::{error, info};
-use uuid::Uuid;
 
 use session::SessionManager;
 
-pub async fn run(socket_path: &Path, listen_addr: Option<SocketAddr>) -> Result<()> {
-    // Ensure parent directory exists
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Remove stale socket
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
-
-    // Generate auth token and write to file
-    let token = Arc::new(Uuid::new_v4().to_string());
-    let token_path = socket_path.with_extension("token");
-    std::fs::write(&token_path, token.as_bytes())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
-
-    let unix_listener = UnixListener::bind(socket_path)?;
-    info!("vex daemon listening on {}", socket_path.display());
-
-    let tcp_listener = match listen_addr {
-        Some(addr) => {
-            let listener = TcpListener::bind(addr).await?;
-            info!("listening on tcp://{}", addr);
-            info!("remote clients: vex --connect {} --token {}", addr, token);
-            Some(listener)
-        }
-        None => None,
-    };
+pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    info!("daemon listening on 127.0.0.1:{}", port);
 
     let manager = Arc::new(SessionManager::new());
 
     // Signal handler for graceful shutdown
     let manager_signal = Arc::clone(&manager);
-    let socket_path_signal = socket_path.to_owned();
-    let token_path_signal = token_path.clone();
+    let pid_path = vex_dir.join("daemon.pid");
     tokio::spawn(async move {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
@@ -66,48 +36,22 @@ pub async fn run(socket_path: &Path, listen_addr: Option<SocketAddr>) -> Result<
 
         info!("shutting down...");
         manager_signal.kill_all().await;
-        let _ = std::fs::remove_file(&socket_path_signal);
-        let _ = std::fs::remove_file(&token_path_signal);
+        let _ = std::fs::remove_file(&pid_path);
         std::process::exit(0);
     });
 
     // Accept loop
     loop {
-        tokio::select! {
-            result = unix_listener.accept() => {
-                match result {
-                    Ok((stream, _addr)) => {
-                        info!("new unix client connection");
-                        let manager = Arc::clone(&manager);
-                        let token = Arc::clone(&token);
-                        tokio::spawn(async move {
-                            handler::handle_connection(stream, manager, token).await;
-                        });
-                    }
-                    Err(e) => {
-                        error!("unix accept error: {}", e);
-                    }
-                }
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                info!("new connection from {}", addr);
+                let manager = Arc::clone(&manager);
+                tokio::spawn(async move {
+                    handler::handle_connection(stream, manager).await;
+                });
             }
-            result = async {
-                match &tcp_listener {
-                    Some(l) => l.accept().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match result {
-                    Ok((stream, addr)) => {
-                        info!("new tcp client connection from {}", addr);
-                        let manager = Arc::clone(&manager);
-                        let token = Arc::clone(&token);
-                        tokio::spawn(async move {
-                            handler::handle_connection(stream, manager, token).await;
-                        });
-                    }
-                    Err(e) => {
-                        error!("tcp accept error: {}", e);
-                    }
-                }
+            Err(e) => {
+                error!("accept error: {}", e);
             }
         }
     }
