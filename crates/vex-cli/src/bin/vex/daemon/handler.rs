@@ -34,8 +34,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     let mut attached: Option<AttachState> = None;
-    let result =
-        connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
+    let result = connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
 
     // Ensure we unregister the client on any exit path
     if let Some(state) = attached {

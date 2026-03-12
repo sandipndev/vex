@@ -182,8 +182,7 @@ fn daemon_start(vex_dir: &Path, port: u16) -> Result<()> {
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
-            nix::unistd::setsid()
-                .map_err(std::io::Error::other)?;
+            nix::unistd::setsid().map_err(std::io::Error::other)?;
             Ok(())
         });
     }
