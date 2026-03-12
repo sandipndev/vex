@@ -1,6 +1,7 @@
 mod daemon;
 mod session;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ fn vex_dir() -> PathBuf {
 #[derive(Serialize, Deserialize)]
 struct SavedConnection {
     host: String,
+    tunnel_port: u16,
 }
 
 fn load_saved_connection(vex_dir: &Path) -> Option<SavedConnection> {
@@ -73,12 +75,12 @@ enum Command {
         /// Session ID or unique prefix
         id: String,
     },
-    /// Save a remote SSH connection as the default target
+    /// Connect to a remote daemon via SSH tunnel
     Connect {
         /// SSH destination (e.g. user@host or an SSH config name)
         host: String,
     },
-    /// Remove the saved remote connection, reverting to local
+    /// Disconnect from the remote daemon
     Disconnect,
 }
 
@@ -97,52 +99,6 @@ enum DaemonCommand {
     /// Run the daemon (internal)
     #[command(hide = true)]
     Run,
-}
-
-// ── SSH forwarding ───────────────────────────────────────────────
-
-fn ssh_args_for(cmd: &Option<Command>) -> (Vec<String>, bool) {
-    let mut args = Vec::new();
-    let mut needs_tty = false;
-    match cmd {
-        Some(Command::Create { shell, attach }) => {
-            args.push("create".into());
-            if let Some(s) = shell {
-                args.extend(["--shell".into(), s.clone()]);
-            }
-            if *attach {
-                args.push("--attach".into());
-                needs_tty = true;
-            }
-        }
-        Some(Command::Attach { id }) => {
-            args.extend(["attach".into(), id.clone()]);
-            needs_tty = true;
-        }
-        Some(Command::Kill { id }) => {
-            args.extend(["kill".into(), id.clone()]);
-        }
-        Some(Command::List) | None => {
-            args.push("list".into());
-        }
-        _ => unreachable!(),
-    }
-    (args, needs_tty)
-}
-
-fn exec_via_ssh(host: &str, args: &[String], needs_tty: bool) -> ! {
-    let mut cmd = std::process::Command::new("ssh");
-    if needs_tty {
-        cmd.arg("-t");
-    }
-    cmd.arg(host).arg("vex").args(args);
-    match cmd.status() {
-        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-        Err(e) => {
-            eprintln!("ssh error: {}", e);
-            std::process::exit(1);
-        }
-    }
 }
 
 // ── Daemon management ────────────────────────────────────────────
@@ -253,39 +209,98 @@ fn daemon_logs(vex_dir: &Path, follow: bool) -> Result<()> {
     Ok(())
 }
 
-// ── Connect / Disconnect ─────────────────────────────────────────
+// ── Connect / Disconnect (SSH tunnel) ────────────────────────────
 
-fn connect_ssh(vex_dir: &Path, host: &str) -> Result<()> {
+fn find_free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
+}
+
+fn connect_ssh(vex_dir: &Path, host: &str, remote_port: u16) -> Result<()> {
     std::fs::create_dir_all(vex_dir)?;
 
-    // Try to verify
-    let verified = std::process::Command::new("ssh")
-        .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"])
-        .arg(host)
-        .args(["vex", "list"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    // Disconnect existing tunnel if any
+    if load_saved_connection(vex_dir).is_some() {
+        let _ = disconnect_ssh(vex_dir);
+    }
 
+    let tunnel_port = find_free_port()?;
+    let ssh_sock = vex_dir.join("ssh.sock");
+
+    // Start SSH tunnel with control socket for lifecycle management
+    let status = std::process::Command::new("ssh")
+        .args([
+            "-f",
+            "-N",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=60",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "ControlMaster=yes",
+            "-o",
+            &format!("ControlPath={}", ssh_sock.display()),
+            "-L",
+            &format!("{}:127.0.0.1:{}", tunnel_port, remote_port),
+            host,
+        ])
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to run ssh: {} (is OpenSSH installed?)", e))?;
+
+    if !status.success() {
+        bail!("failed to establish SSH tunnel to {}", host);
+    }
+
+    // Brief wait for tunnel to be fully ready
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Verify remote daemon is reachable through tunnel
+    let verified = std::net::TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], tunnel_port)),
+        Duration::from_secs(2),
+    )
+    .is_ok();
+
+    // Save connection
     let conn = SavedConnection {
         host: host.to_string(),
+        tunnel_port,
     };
     let data = serde_json::to_string(&conn)?;
     std::fs::write(vex_dir.join("connect.json"), &data)?;
 
     if verified {
-        eprintln!("connected to {} (verified)", host);
+        eprintln!("connected to {}", host);
     } else {
-        eprintln!(
-            "warning: could not verify connection to {}\nsaved connection (unverified)",
-            host
-        );
+        eprintln!("tunnel to {} established", host);
+        eprintln!("note: remote daemon not reachable — run `vex daemon start` on the remote");
     }
+
     Ok(())
 }
 
 fn disconnect_ssh(vex_dir: &Path) -> Result<()> {
+    let ssh_sock = vex_dir.join("ssh.sock");
+
+    if let Some(saved) = load_saved_connection(vex_dir) {
+        // Kill SSH tunnel via control socket
+        let _ = std::process::Command::new("ssh")
+            .args([
+                "-O",
+                "exit",
+                "-o",
+                &format!("ControlPath={}", ssh_sock.display()),
+                &saved.host,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    let _ = std::fs::remove_file(&ssh_sock);
+
     let path = vex_dir.join("connect.json");
     match std::fs::remove_file(&path) {
         Ok(()) => {}
@@ -317,7 +332,7 @@ async fn main() -> Result<()> {
                 }
             };
         }
-        Some(Command::Connect { host }) => return connect_ssh(&vex_dir, host),
+        Some(Command::Connect { host }) => return connect_ssh(&vex_dir, host, port),
         Some(Command::Disconnect) => {
             disconnect_ssh(&vex_dir)?;
             return Ok(());
@@ -325,28 +340,27 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
-    // Phase 2: check for SSH forwarding
-    if let Some(saved) = load_saved_connection(&vex_dir) {
-        let (args, needs_tty) = ssh_args_for(&cli.command);
-        exec_via_ssh(&saved.host, &args, needs_tty);
-    }
+    // Phase 2: determine effective port (local daemon or SSH tunnel)
+    let effective_port = load_saved_connection(&vex_dir)
+        .map(|c| c.tunnel_port)
+        .unwrap_or(port);
 
-    // Phase 3: local commands
+    // Phase 3: session commands
     match cli.command {
         Some(Command::Create { shell, attach }) => {
-            let id = session::session_create(port, shell).await?;
+            let id = session::session_create(effective_port, shell).await?;
             if attach {
-                session::session_attach(port, &id).await?;
+                session::session_attach(effective_port, &id).await?;
             }
         }
         Some(Command::Attach { id }) => {
-            session::session_attach(port, &id).await?;
+            session::session_attach(effective_port, &id).await?;
         }
         Some(Command::Kill { id }) => {
-            session::session_kill(port, &id).await?;
+            session::session_kill(effective_port, &id).await?;
         }
         Some(Command::List) | None => {
-            session::session_list(port).await?;
+            session::session_list(effective_port).await?;
         }
         _ => unreachable!(),
     }

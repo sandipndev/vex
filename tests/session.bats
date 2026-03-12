@@ -398,22 +398,18 @@ attach_via_pty() {
 }
 
 # ═══════════════════════════════════════════════════════════════════
-#  Connect / Disconnect (SSH target management)
+#  Connect / Disconnect (SSH tunnel)
 # ═══════════════════════════════════════════════════════════════════
 
-@test "connect: saves connection file" {
-    # Use a host that fails quickly in BatchMode
-    run vex connect "nobody@127.0.0.1"
+@test "disconnect: no-op when not connected" {
+    run "$VEX" disconnect
     [ "$status" -eq 0 ]
-    [ -f "$VEX_DIR/connect.json" ]
-    [[ "$(cat "$VEX_DIR/connect.json")" == *"nobody@127.0.0.1"* ]]
-
-    "$VEX" disconnect
 }
 
-@test "disconnect: removes connection file" {
-    "$VEX" connect "nobody@127.0.0.1" 2>/dev/null || true
-    [ -f "$VEX_DIR/connect.json" ]
+@test "disconnect: cleans up connection file" {
+    # Manually create a saved connection to test disconnect cleanup
+    mkdir -p "$VEX_DIR"
+    echo '{"host":"test@host","tunnel_port":12345}' > "$VEX_DIR/connect.json"
 
     run vex disconnect
     [ "$status" -eq 0 ]
@@ -421,9 +417,26 @@ attach_via_pty() {
     [ ! -f "$VEX_DIR/connect.json" ]
 }
 
-@test "disconnect: no-op when not connected" {
-    run "$VEX" disconnect
+@test "commands use tunnel port when connected" {
+    # Create a fake connection pointing to our actual daemon port
+    mkdir -p "$VEX_DIR"
+    echo "{\"host\":\"fake\",\"tunnel_port\":$VEX_PORT}" > "$VEX_DIR/connect.json"
+
+    # Commands should work through the "tunnel" (same local daemon)
+    run "$VEX" list
     [ "$status" -eq 0 ]
+    [[ "$output" == *"no active sessions"* ]]
+
+    run "$VEX" create
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ $UUID_RE ]]
+    SID="$output"
+
+    run "$VEX" kill "$SID"
+    [ "$status" -eq 0 ]
+
+    # Clean up
+    rm "$VEX_DIR/connect.json"
 }
 
 # ═══════════════════════════════════════════════════════════════════
