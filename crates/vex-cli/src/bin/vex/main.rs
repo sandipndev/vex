@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ fn load_saved_connection(vex_dir: &Path) -> Option<SavedConnection> {
 }
 
 #[derive(Parser)]
-#[command(name = "vex", about = "Vex terminal multiplexer")]
+#[command(name = "vex", about = "Vex terminal multiplexer", version)]
 struct Cli {
     /// Daemon port
     #[arg(long, env = "VEX_PORT", default_value_t = DEFAULT_PORT)]
@@ -48,11 +48,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage sessions
+    #[command(alias = "s")]
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Manage the daemon
+    #[command(alias = "d")]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Manage remote connections
+    #[command(alias = "r")]
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
+    /// Attach to a session
+    Attach {
+        /// Session ID or unique prefix
+        id: String,
+    },
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
     /// Create a new session
     Create {
         /// Shell to use (defaults to $SHELL or /bin/sh)
@@ -65,23 +92,16 @@ enum Command {
     /// List active sessions
     #[command(alias = "ls")]
     List,
-    /// Attach to a session
-    Attach {
-        /// Session ID or unique prefix
-        id: String,
-    },
     /// Kill a session
     Kill {
         /// Session ID or unique prefix
         id: String,
     },
-    /// Connect to a remote daemon via SSH tunnel
-    Connect {
-        /// SSH destination (e.g. user@host or an SSH config name)
-        host: String,
+    /// Attach to a session
+    Attach {
+        /// Session ID or unique prefix
+        id: String,
     },
-    /// Disconnect from the remote daemon
-    Disconnect,
 }
 
 #[derive(Subcommand)]
@@ -90,6 +110,8 @@ enum DaemonCommand {
     Start,
     /// Stop the running daemon
     Stop,
+    /// Show daemon status
+    Status,
     /// Show daemon logs
     Logs {
         /// Follow log output
@@ -99,6 +121,20 @@ enum DaemonCommand {
     /// Run the daemon (internal)
     #[command(hide = true)]
     Run,
+}
+
+#[derive(Subcommand)]
+enum RemoteCommand {
+    /// Connect to a remote daemon via SSH tunnel
+    Connect {
+        /// SSH destination (e.g. user@host or an SSH config name)
+        host: String,
+    },
+    /// Disconnect from the remote daemon
+    Disconnect,
+    /// Show current remote connection
+    #[command(alias = "ls")]
+    List,
 }
 
 // ── Daemon management ────────────────────────────────────────────
@@ -189,6 +225,19 @@ fn daemon_stop(vex_dir: &Path) -> Result<()> {
 
     let _ = std::fs::remove_file(&pid_path);
     eprintln!("daemon stopped");
+    Ok(())
+}
+
+fn daemon_status(vex_dir: &Path, port: u16) -> Result<()> {
+    let pid_path = vex_dir.join("daemon.pid");
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+        && kill(Pid::from_raw(pid), None).is_ok()
+    {
+        eprintln!("daemon running (pid {}, port {})", pid, port);
+    } else {
+        eprintln!("daemon not running");
+    }
     Ok(())
 }
 
@@ -311,6 +360,15 @@ fn disconnect_ssh(vex_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remote_list(vex_dir: &Path) -> Result<()> {
+    if let Some(conn) = load_saved_connection(vex_dir) {
+        println!("{} (tunnel port {})", conn.host, conn.tunnel_port);
+    } else {
+        println!("not connected to any remote");
+    }
+    Ok(())
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -319,12 +377,21 @@ async fn main() -> Result<()> {
     let port = cli.port;
     let vex_dir = vex_dir();
 
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            Cli::command().print_help()?;
+            return Ok(());
+        }
+    };
+
     // Phase 1: always-local commands
-    match &cli.command {
-        Some(Command::Daemon { command }) => {
+    match &command {
+        Command::Daemon { command } => {
             return match command {
                 DaemonCommand::Start => daemon_start(&vex_dir, port),
                 DaemonCommand::Stop => daemon_stop(&vex_dir),
+                DaemonCommand::Status => daemon_status(&vex_dir, port),
                 DaemonCommand::Logs { follow } => daemon_logs(&vex_dir, *follow),
                 DaemonCommand::Run => {
                     tracing_subscriber::fmt::init();
@@ -332,9 +399,15 @@ async fn main() -> Result<()> {
                 }
             };
         }
-        Some(Command::Connect { host }) => return connect_ssh(&vex_dir, host, port),
-        Some(Command::Disconnect) => {
-            disconnect_ssh(&vex_dir)?;
+        Command::Remote { command } => {
+            return match command {
+                RemoteCommand::Connect { host } => connect_ssh(&vex_dir, host, port),
+                RemoteCommand::Disconnect => disconnect_ssh(&vex_dir),
+                RemoteCommand::List => remote_list(&vex_dir),
+            };
+        }
+        Command::Completions { shell } => {
+            clap_complete::generate(*shell, &mut Cli::command(), "vex", &mut std::io::stdout());
             return Ok(());
         }
         _ => {}
@@ -346,21 +419,26 @@ async fn main() -> Result<()> {
         .unwrap_or(port);
 
     // Phase 3: session commands
-    match cli.command {
-        Some(Command::Create { shell, attach }) => {
-            let id = session::session_create(effective_port, shell).await?;
-            if attach {
+    match command {
+        Command::Session { command } => match command {
+            SessionCommand::Create { shell, attach } => {
+                let id = session::session_create(effective_port, shell).await?;
+                if attach {
+                    session::session_attach(effective_port, &id).await?;
+                }
+            }
+            SessionCommand::List => {
+                session::session_list(effective_port).await?;
+            }
+            SessionCommand::Kill { id } => {
+                session::session_kill(effective_port, &id).await?;
+            }
+            SessionCommand::Attach { id } => {
                 session::session_attach(effective_port, &id).await?;
             }
-        }
-        Some(Command::Attach { id }) => {
+        },
+        Command::Attach { id } => {
             session::session_attach(effective_port, &id).await?;
-        }
-        Some(Command::Kill { id }) => {
-            session::session_kill(effective_port, &id).await?;
-        }
-        Some(Command::List) | None => {
-            session::session_list(effective_port).await?;
         }
         _ => unreachable!(),
     }
