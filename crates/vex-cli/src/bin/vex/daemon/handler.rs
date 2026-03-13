@@ -31,7 +31,11 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
     session_manager: &SessionManager,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (reader, mut writer) = tokio::io::split(stream);
+    // BufReader makes read_exact cancellation-safe inside tokio::select!.
+    // Without it, select! can cancel a partial read_exact, losing consumed
+    // bytes and desynchronizing the frame protocol.
+    let mut reader = tokio::io::BufReader::new(reader);
 
     let mut attached: Option<AttachState> = None;
     let result = connection_loop(

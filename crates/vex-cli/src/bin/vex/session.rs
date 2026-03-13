@@ -92,7 +92,11 @@ pub async fn session_attach(port: u16, id_prefix: &str) -> Result<()> {
     let id = resolve_session_id(port, id_prefix).await?;
 
     let stream = connect(port).await?;
-    let (mut reader, mut writer) = io::split(stream);
+    let (reader, mut writer) = io::split(stream);
+    // BufReader makes read_exact cancellation-safe inside tokio::select!.
+    // Without it, select! can cancel a partial read_exact, losing consumed
+    // bytes and desynchronizing the frame protocol.
+    let mut reader = tokio::io::BufReader::new(reader);
 
     // Detect terminal size for the attach request
     let (cols, rows) = terminal_size::terminal_size()
