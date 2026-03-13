@@ -1,8 +1,0 @@
-#!/bin/sh
-# Mock claude CLI for testing vex agent commands.
-# Records arguments for verification, outputs canned NDJSON.
-echo "$@" >> "$VEX_DIR/claude-args.log"
-echo '{"type":"system","session_id":"mock-session-123"}'
-echo '{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello from mock"}}'
-echo '{"type":"message_stop"}'
-echo '{"type":"result","session_id":"mock-session-123","result":"Hello from mock"}'

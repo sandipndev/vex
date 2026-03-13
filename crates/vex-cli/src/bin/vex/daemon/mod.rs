@@ -1,4 +1,3 @@
-mod agent;
 mod handler;
 mod session;
 
@@ -9,18 +8,16 @@ use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-use agent::AgentManager;
 use session::SessionManager;
 
 pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     info!("daemon listening on 127.0.0.1:{}", port);
 
-    let session_manager = Arc::new(SessionManager::new());
-    let agent_manager = Arc::new(AgentManager::new());
+    let manager = Arc::new(SessionManager::new());
 
     // Signal handler for graceful shutdown
-    let session_manager_signal = Arc::clone(&session_manager);
+    let manager_signal = Arc::clone(&manager);
     let pid_path = vex_dir.join("daemon.pid");
     tokio::spawn(async move {
         let mut sigterm =
@@ -38,7 +35,7 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
         }
 
         info!("shutting down...");
-        session_manager_signal.kill_all().await;
+        manager_signal.kill_all().await;
         let _ = std::fs::remove_file(&pid_path);
         std::process::exit(0);
     });
@@ -48,10 +45,9 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 info!("new connection from {}", addr);
-                let session_manager = Arc::clone(&session_manager);
-                let agent_manager = Arc::clone(&agent_manager);
+                let manager = Arc::clone(&manager);
                 tokio::spawn(async move {
-                    handler::handle_connection(stream, session_manager, agent_manager).await;
+                    handler::handle_connection(stream, manager).await;
                 });
             }
             Err(e) => {

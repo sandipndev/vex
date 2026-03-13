@@ -11,93 +11,25 @@ const MAX_FRAME_SIZE: usize = 1_048_576; // 1 MiB
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
-    CreateSession {
-        shell: Option<String>,
-    },
+    CreateSession { shell: Option<String> },
     ListSessions,
-    AttachSession {
-        id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
+    AttachSession { id: Uuid, cols: u16, rows: u16 },
     DetachSession,
-    ResizeSession {
-        id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
-    KillSession {
-        id: Uuid,
-    },
-    CreateAgent {
-        model: Option<String>,
-        permission_mode: Option<String>,
-        allowed_tools: Vec<String>,
-        max_turns: Option<u32>,
-        cwd: Option<String>,
-    },
-    AgentPrompt {
-        id: Uuid,
-        prompt: String,
-    },
-    AgentStatus {
-        id: Uuid,
-    },
-    ListAgents,
-    KillAgent {
-        id: Uuid,
-    },
+    ResizeSession { id: Uuid, cols: u16, rows: u16 },
+    KillSession { id: Uuid },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
-    SessionCreated {
-        id: Uuid,
-    },
-    Sessions {
-        sessions: Vec<SessionInfo>,
-    },
-    Attached {
-        id: Uuid,
-    },
+    SessionCreated { id: Uuid },
+    Sessions { sessions: Vec<SessionInfo> },
+    Attached { id: Uuid },
     Detached,
-    SessionEnded {
-        id: Uuid,
-        exit_code: Option<i32>,
-    },
-    ClientJoined {
-        session_id: Uuid,
-        client_id: Uuid,
-    },
-    ClientLeft {
-        session_id: Uuid,
-        client_id: Uuid,
-    },
-    Error {
-        message: String,
-    },
-    AgentCreated {
-        id: Uuid,
-    },
-    AgentOutput {
-        id: Uuid,
-        event: AgentEvent,
-    },
-    AgentPromptDone {
-        id: Uuid,
-        turn_count: u32,
-    },
-    AgentStatusResponse {
-        id: Uuid,
-        status: AgentState,
-        claude_session_id: Option<String>,
-        model: Option<String>,
-        turn_count: u32,
-    },
-    Agents {
-        agents: Vec<AgentInfo>,
-    },
+    SessionEnded { id: Uuid, exit_code: Option<i32> },
+    ClientJoined { session_id: Uuid, client_id: Uuid },
+    ClientLeft { session_id: Uuid, client_id: Uuid },
+    Error { message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,38 +39,6 @@ pub struct SessionInfo {
     pub rows: u16,
     pub created_at: DateTime<Utc>,
     pub client_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum AgentState {
-    Idle,
-    Processing,
-    Error(String),
-}
-
-impl std::fmt::Display for AgentState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentState::Idle => write!(f, "idle"),
-            AgentState::Processing => write!(f, "processing"),
-            AgentState::Error(msg) => write!(f, "error: {}", msg),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentInfo {
-    pub id: Uuid,
-    pub status: AgentState,
-    pub model: Option<String>,
-    pub turn_count: u32,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentEvent {
-    pub event_type: String,
-    pub raw_json: String,
 }
 
 #[derive(Debug)]
@@ -237,27 +137,6 @@ mod tests {
                 rows: 24,
             },
             ClientMessage::KillSession { id: Uuid::nil() },
-            ClientMessage::CreateAgent {
-                model: Some("sonnet".into()),
-                permission_mode: Some("plan".into()),
-                allowed_tools: vec!["Read".into(), "Write".into()],
-                max_turns: Some(10),
-                cwd: Some("/tmp".into()),
-            },
-            ClientMessage::CreateAgent {
-                model: None,
-                permission_mode: None,
-                allowed_tools: vec![],
-                max_turns: None,
-                cwd: None,
-            },
-            ClientMessage::AgentPrompt {
-                id: Uuid::nil(),
-                prompt: "do something".into(),
-            },
-            ClientMessage::AgentStatus { id: Uuid::nil() },
-            ClientMessage::ListAgents,
-            ClientMessage::KillAgent { id: Uuid::nil() },
         ];
         for msg in msgs {
             let json = serde_json::to_string(&msg).unwrap();
@@ -295,48 +174,6 @@ mod tests {
             },
             ServerMessage::Error {
                 message: "fail".into(),
-            },
-            ServerMessage::AgentCreated { id: Uuid::nil() },
-            ServerMessage::AgentOutput {
-                id: Uuid::nil(),
-                event: AgentEvent {
-                    event_type: "content_block_delta".into(),
-                    raw_json: r#"{"type":"content_block_delta"}"#.into(),
-                },
-            },
-            ServerMessage::AgentPromptDone {
-                id: Uuid::nil(),
-                turn_count: 3,
-            },
-            ServerMessage::AgentStatusResponse {
-                id: Uuid::nil(),
-                status: AgentState::Idle,
-                claude_session_id: Some("sess-123".into()),
-                model: Some("sonnet".into()),
-                turn_count: 5,
-            },
-            ServerMessage::AgentStatusResponse {
-                id: Uuid::nil(),
-                status: AgentState::Processing,
-                claude_session_id: None,
-                model: None,
-                turn_count: 0,
-            },
-            ServerMessage::AgentStatusResponse {
-                id: Uuid::nil(),
-                status: AgentState::Error("something broke".into()),
-                claude_session_id: None,
-                model: None,
-                turn_count: 0,
-            },
-            ServerMessage::Agents {
-                agents: vec![AgentInfo {
-                    id: Uuid::nil(),
-                    status: AgentState::Idle,
-                    model: Some("sonnet".into()),
-                    turn_count: 2,
-                    created_at: Utc::now(),
-                }],
             },
         ];
         for msg in msgs {
