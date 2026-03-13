@@ -45,4 +45,4 @@ jobs:
           sudo /tmp/bats-core/install.sh /usr/local
 
       - name: Run e2e tests
-        run: bats --jobs 4 tests/session.bats
+        run: bats --jobs 4 tests/session.bats tests/agent.bats

@@ -1,0 +1,20 @@
+name: Release Trigger
+
+on:
+  push:
+    branches: [meta/release]
+    paths: [VERSION]
+
+jobs:
+  trigger:
+    name: Trigger Release
+    runs-on: ubuntu-latest
+    # Skip auto-bump commits from the release workflow itself
+    if: github.actor != 'github-actions[bot]'
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --repo "${{ github.repository }}"
