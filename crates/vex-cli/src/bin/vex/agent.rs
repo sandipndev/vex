@@ -130,6 +130,14 @@ fn render_agent_event(event_type: &str, raw_json: &str, out: &mut impl Write) ->
                 out.flush()?;
             }
         }
+        "error" => {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw_json)
+                && let Some(msg) = v.get("error").and_then(|e| e.as_str())
+            {
+                writeln!(out, "\nerror: {}", msg)?;
+                out.flush()?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -173,10 +181,11 @@ pub async fn agent_list(port: u16) -> Result<()> {
                     "ID", "STATUS", "MODEL", "TURNS"
                 );
                 for a in agents {
+                    let status_str = truncate_status(&a.status.to_string(), 12);
                     println!(
                         "{:<36}  {:<12}  {:<10}  {:>5}  {}",
                         a.id,
-                        a.status,
+                        status_str,
                         a.model.as_deref().unwrap_or("(default)"),
                         a.turn_count,
                         a.created_at.format("%Y-%m-%d %H:%M:%S")
@@ -199,6 +208,16 @@ pub async fn agent_kill(port: u16, id_prefix: &str) -> Result<()> {
             println!("killed agent {}", id);
             Ok(())
         }
+    }
+}
+
+fn truncate_status(s: &str, max: usize) -> String {
+    // Take only the first line for table display
+    let first_line = s.lines().next().unwrap_or(s);
+    if first_line.len() <= max {
+        first_line.to_string()
+    } else {
+        format!("{}…", &first_line[..max - 1])
     }
 }
 

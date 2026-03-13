@@ -123,7 +123,7 @@ impl AgentManager {
         let mut cmd = Command::new("claude");
         cmd.args(&args)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
 
         if let Some(ref dir) = cwd {
@@ -138,6 +138,7 @@ impl AgentManager {
         })?;
 
         let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
 
         // Store the child process
         {
@@ -151,6 +152,16 @@ impl AgentManager {
         let agents = Arc::clone(&self.agents);
 
         tokio::spawn(async move {
+            // Read stderr in background so it doesn't block
+            let stderr_handle = tokio::spawn(async move {
+                let mut stderr_buf = String::new();
+                let mut stderr_reader = tokio::io::BufReader::new(stderr);
+                let _ =
+                    tokio::io::AsyncReadExt::read_to_string(&mut stderr_reader, &mut stderr_buf)
+                        .await;
+                stderr_buf
+            });
+
             let reader = tokio::io::BufReader::new(stdout);
             let mut lines = reader.lines();
             let mut captured_session_id: Option<String> = None;
@@ -185,6 +196,8 @@ impl AgentManager {
                 }
             }
 
+            let stderr_output = stderr_handle.await.unwrap_or_default();
+
             // Wait for the child process to exit
             {
                 let mut agents = agents.lock().await;
@@ -196,11 +209,43 @@ impl AgentManager {
                                 handle.status = AgentState::Idle;
                             }
                             Ok(s) => {
-                                handle.status =
-                                    AgentState::Error(format!("claude exited with status {}", s));
+                                let err_msg = if stderr_output.trim().is_empty() {
+                                    format!("claude exited with {}", s)
+                                } else {
+                                    stderr_output.trim().to_string()
+                                };
+                                handle.status = AgentState::Error(err_msg.clone());
+                                // Send error as an AgentOutput event so client sees it
+                                let _ = tx
+                                    .send(ServerMessage::AgentOutput {
+                                        id,
+                                        event: AgentEvent {
+                                            event_type: "error".to_string(),
+                                            raw_json: serde_json::json!({
+                                                "type": "error",
+                                                "error": err_msg,
+                                            })
+                                            .to_string(),
+                                        },
+                                    })
+                                    .await;
                             }
                             Err(e) => {
-                                handle.status = AgentState::Error(format!("wait error: {}", e));
+                                let err_msg = format!("wait error: {}", e);
+                                handle.status = AgentState::Error(err_msg.clone());
+                                let _ = tx
+                                    .send(ServerMessage::AgentOutput {
+                                        id,
+                                        event: AgentEvent {
+                                            event_type: "error".to_string(),
+                                            raw_json: serde_json::json!({
+                                                "type": "error",
+                                                "error": err_msg,
+                                            })
+                                            .to_string(),
+                                        },
+                                    })
+                                    .await;
                             }
                         }
                     } else {

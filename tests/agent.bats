@@ -177,3 +177,21 @@ vex() { "$VEX" "$@" 2>&1; }
     [[ "$output" == *"$id1"* ]]
     [[ "$output" == *"$id2"* ]]
 }
+
+@test "claude stderr is surfaced on failure" {
+    id=$(vex agent create)
+    touch "$VEX_DIR/mock-fail"
+    run vex agent prompt "$id" "test"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"authentication required"* ]]
+}
+
+@test "agent status shows error after failed prompt" {
+    id=$(vex agent create)
+    touch "$VEX_DIR/mock-fail"
+    vex agent prompt "$id" "test"
+    run vex agent status "$id"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"error:"* ]]
+    [[ "$output" == *"authentication required"* ]]
+}
