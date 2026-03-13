@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 use uuid::Uuid;
 use vex_cli::proto::{
@@ -26,26 +26,47 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'stati
     }
 }
 
-async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
+async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     session_manager: &SessionManager,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
     let (reader, mut writer) = tokio::io::split(stream);
-    // BufReader makes read_exact cancellation-safe inside tokio::select!.
-    // Without it, select! can cancel a partial read_exact, losing consumed
-    // bytes and desynchronizing the frame protocol.
-    let mut reader = tokio::io::BufReader::new(reader);
+
+    // Spawn a dedicated frame-reader task so that read_frame is never
+    // cancelled by tokio::select!.  read_exact is NOT cancellation-safe:
+    // if select! drops it mid-read, consumed bytes are lost and the frame
+    // protocol desynchronises.  Channel recv IS cancellation-safe.
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Result<Frame>>(64);
+    let reader_task = tokio::spawn(async move {
+        let mut reader = reader;
+        loop {
+            match read_frame(&mut reader).await {
+                Ok(Some(frame)) => {
+                    if frame_tx.send(Ok(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+    });
 
     let mut attached: Option<AttachState> = None;
     let result = connection_loop(
         client_id,
-        &mut reader,
+        &mut frame_rx,
         &mut writer,
         &mut attached,
         session_manager,
     )
     .await;
+
+    reader_task.abort();
 
     // Ensure we unregister the client on any exit path
     if let Some(state) = attached {
@@ -57,9 +78,9 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
     result
 }
 
-async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+async fn connection_loop<W: AsyncWrite + Unpin>(
     client_id: Uuid,
-    reader: &mut R,
+    frame_rx: &mut mpsc::Receiver<Result<Frame>>,
     writer: &mut W,
     attached: &mut Option<AttachState>,
     session_manager: &SessionManager,
@@ -69,13 +90,9 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             let session_id = state.session_id;
             // Attached state: select on client frames, session output, or events
             tokio::select! {
-                frame = read_frame(reader) => {
-                    match frame? {
-                        None => {
-                            info!("client {} disconnected while attached to {}", client_id, session_id);
-                            break;
-                        }
-                        Some(Frame::Data(data)) => {
+                msg = frame_rx.recv() => {
+                    match msg {
+                        Some(Ok(Frame::Data(data))) => {
                             if let Err(e) = session_manager.write_input(session_id, &data).await {
                                 warn!("write_input error: {}", e);
                                 send_server_message(
@@ -88,7 +105,7 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                 *attached = None;
                             }
                         }
-                        Some(Frame::Control(data)) => {
+                        Some(Ok(Frame::Control(data))) => {
                             let msg: ClientMessage = serde_json::from_slice(&data)?;
                             match msg {
                                 ClientMessage::DetachSession => {
@@ -125,6 +142,11 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                 }
                             }
                         }
+                        Some(Err(e)) => return Err(e),
+                        None => {
+                            info!("client {} disconnected while attached to {}", client_id, session_id);
+                            break;
+                        }
                     }
                 }
                 output = state.output_rx.recv() => {
@@ -157,13 +179,9 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
             }
         } else {
-            // Idle state: only read client frames
-            match read_frame(reader).await? {
-                None => {
-                    info!("client {} disconnected", client_id);
-                    break;
-                }
-                Some(Frame::Control(data)) => {
+            // Idle state: only read client frames (no select, no cancellation issue)
+            match frame_rx.recv().await {
+                Some(Ok(Frame::Control(data))) => {
                     let msg: ClientMessage = serde_json::from_slice(&data)?;
                     if let ClientMessage::AttachSession { id, cols, rows } = msg {
                         match session_manager.attach_session(id).await {
@@ -197,7 +215,7 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                         handle_control_idle(msg, session_manager, writer).await?;
                     }
                 }
-                Some(Frame::Data(_)) => {
+                Some(Ok(Frame::Data(_))) => {
                     send_server_message(
                         writer,
                         &ServerMessage::Error {
@@ -205,6 +223,11 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                         },
                     )
                     .await?;
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    info!("client {} disconnected", client_id);
+                    break;
                 }
             }
         }
