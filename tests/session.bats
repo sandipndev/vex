@@ -57,7 +57,7 @@ wait_for_no_sessions() {
 attach_via_pty() {
     local sid="$1"; shift
     # Remaining args are eval'd in a subshell that feeds stdin
-    ( eval "$@" ) | timeout 5 script -qec "$VEX attach $sid" /dev/null 2>&1 || true
+    ( eval "$@" ) | timeout 5 script -qec "$VEX session attach $sid" /dev/null 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -512,7 +512,7 @@ attach_via_pty() {
 
     # Attach in background (sends terminal dimensions), keep attached
     ( sleep 2; printf '\x1d' ) \
-        | timeout 5 script -qec "$VEX attach $SID" /dev/null >/dev/null 2>&1 &
+        | timeout 5 script -qec "$VEX session attach $SID" /dev/null >/dev/null 2>&1 &
     ATTACH_PID=$!
     sleep 1
 
