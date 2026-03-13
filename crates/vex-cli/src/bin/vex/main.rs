@@ -1,3 +1,4 @@
+mod agent;
 mod daemon;
 mod session;
 
@@ -82,6 +83,53 @@ enum Command {
     },
     /// Disconnect from the remote daemon
     Disconnect,
+    /// Manage AI agents
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Create a new agent
+    Create {
+        /// Claude model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Permission mode (e.g. plan, full)
+        #[arg(long)]
+        permission_mode: Option<String>,
+        /// Allowed tools (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        allowed_tools: Vec<String>,
+        /// Maximum turns
+        #[arg(long)]
+        max_turns: Option<u32>,
+        /// Working directory for the agent
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// Send a prompt to an agent
+    Prompt {
+        /// Agent ID or unique prefix
+        id: String,
+        /// The prompt text
+        prompt: String,
+    },
+    /// Show agent status
+    Status {
+        /// Agent ID or unique prefix
+        id: String,
+    },
+    /// List all agents
+    #[command(alias = "ls")]
+    List,
+    /// Kill an agent
+    Kill {
+        /// Agent ID or unique prefix
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -345,7 +393,7 @@ async fn main() -> Result<()> {
         .map(|c| c.tunnel_port)
         .unwrap_or(port);
 
-    // Phase 3: session commands
+    // Phase 3: session and agent commands
     match cli.command {
         Some(Command::Create { shell, attach }) => {
             let id = session::session_create(effective_port, shell).await?;
@@ -359,6 +407,37 @@ async fn main() -> Result<()> {
         Some(Command::Kill { id }) => {
             session::session_kill(effective_port, &id).await?;
         }
+        Some(Command::Agent { command }) => match command {
+            AgentCommand::Create {
+                model,
+                permission_mode,
+                allowed_tools,
+                max_turns,
+                cwd,
+            } => {
+                agent::agent_create(
+                    effective_port,
+                    model,
+                    permission_mode,
+                    allowed_tools,
+                    max_turns,
+                    cwd,
+                )
+                .await?;
+            }
+            AgentCommand::Prompt { id, prompt } => {
+                agent::agent_prompt(effective_port, &id, &prompt).await?;
+            }
+            AgentCommand::Status { id } => {
+                agent::agent_status(effective_port, &id).await?;
+            }
+            AgentCommand::List => {
+                agent::agent_list(effective_port).await?;
+            }
+            AgentCommand::Kill { id } => {
+                agent::agent_kill(effective_port, &id).await?;
+            }
+        },
         Some(Command::List) | None => {
             session::session_list(effective_port).await?;
         }
