@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use chrono::Utc;
@@ -7,7 +8,9 @@ use pty_process::Size;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
-use vex_cli::proto::{ServerMessage, SessionInfo};
+use vex_cli::proto::{AgentSessionInfo, ClaudeInfo, ServerMessage, SessionInfo};
+
+use super::detect;
 
 const MAX_SCROLLBACK: usize = 64 * 1024;
 
@@ -23,6 +26,10 @@ pub struct SessionHandle {
     pub clients: HashMap<Uuid, (u16, u16)>,
     /// Channel for presence events (ClientJoined/ClientLeft).
     pub event_tx: broadcast::Sender<ServerMessage>,
+    /// PID of the shell process running in the PTY.
+    pub shell_pid: Option<u32>,
+    /// Set when a BEL character (0x07) is received from the PTY.
+    pub bell_rang: Arc<AtomicBool>,
 }
 
 pub struct SessionManager {
@@ -51,11 +58,13 @@ impl SessionManager {
 
         let cmd = pty_process::Command::new(&shell);
         let child = cmd.spawn(pts).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let shell_pid = child.id();
 
         let (read_pty, write_pty) = pty.into_split();
         let (output_tx, _) = broadcast::channel(256);
         let scrollback = Arc::new(Mutex::new(Vec::new()));
         let (event_tx, _) = broadcast::channel(16);
+        let bell_rang = Arc::new(AtomicBool::new(false));
 
         let id = Uuid::new_v4();
         let handle = SessionHandle {
@@ -68,6 +77,8 @@ impl SessionManager {
             scrollback: Arc::clone(&scrollback),
             clients: HashMap::new(),
             event_tx,
+            shell_pid,
+            bell_rang: Arc::clone(&bell_rang),
         };
 
         {
@@ -77,6 +88,7 @@ impl SessionManager {
 
         // PTY reader task: append to scrollback and broadcast under the same
         // lock so that attach_session can atomically snapshot + subscribe.
+        let bell_flag = Arc::clone(&bell_rang);
         tokio::spawn(async move {
             let mut read_pty = read_pty;
             let mut buf = [0u8; 4096];
@@ -85,6 +97,9 @@ impl SessionManager {
                     Ok(0) => break,
                     Ok(n) => {
                         let chunk = &buf[..n];
+                        if chunk.contains(&0x07) {
+                            bell_flag.store(true, Ordering::Relaxed);
+                        }
                         let mut sb = scrollback.lock().await;
                         sb.extend_from_slice(chunk);
                         if sb.len() > MAX_SCROLLBACK {
@@ -164,6 +179,7 @@ impl SessionManager {
             .get_mut(&session_id)
             .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
         h.clients.insert(client_id, (cols, rows));
+        h.bell_rang.store(false, Ordering::Relaxed);
         let _ = h.event_tx.send(ServerMessage::ClientJoined {
             session_id,
             client_id,
@@ -224,7 +240,10 @@ impl SessionManager {
         let pty_writer = {
             let sessions = self.sessions.lock().await;
             match sessions.get(&id) {
-                Some(h) => Arc::clone(&h.pty_writer),
+                Some(h) => {
+                    h.bell_rang.store(false, Ordering::Relaxed);
+                    Arc::clone(&h.pty_writer)
+                }
                 None => bail!("session not found: {}", id),
             }
         };
@@ -249,6 +268,31 @@ impl SessionManager {
         use tokio::io::AsyncWriteExt;
         let _ = writer.shutdown().await;
         Ok(())
+    }
+
+    pub async fn list_agent_sessions(&self) -> Vec<AgentSessionInfo> {
+        let sessions = self.sessions.lock().await;
+        let mut result = Vec::new();
+        for h in sessions.values() {
+            let Some(shell_pid) = h.shell_pid else {
+                continue;
+            };
+            let claude_procs = detect::find_claude_descendants(shell_pid);
+            for cp in claude_procs {
+                let claude_session_id = detect::extract_claude_session_id(&cp.cmdline);
+                result.push(AgentSessionInfo {
+                    session_id: h.id,
+                    created_at: h.created_at,
+                    client_count: h.clients.len(),
+                    bell_rang: h.bell_rang.load(Ordering::Relaxed),
+                    claude: ClaudeInfo {
+                        pid: cp.pid,
+                        claude_session_id,
+                    },
+                });
+            }
+        }
+        result
     }
 
     pub async fn kill_all(&self) {
