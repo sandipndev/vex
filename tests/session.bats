@@ -494,6 +494,26 @@ attach_via_pty() {
     [[ "$OUTPUT" =~ [1-9][0-9]*\ [1-9][0-9]* ]]
 }
 
+@test "rapid input burst does not corrupt connection" {
+    run "$VEX" create --shell /bin/sh
+    [ "$status" -eq 0 ]
+    SID="$output"
+
+    # Send a rapid burst of commands to stress the stdin/frame interleaving.
+    # Each command generates both stdin (client→server) and output (server→client)
+    # traffic simultaneously, which exercises tokio::select! cancel-safety.
+    OUTPUT=$(attach_via_pty "$SID" \
+        "sleep 0.3; for i in \$(seq 1 200); do printf 'echo x\n'; done; sleep 1.5; printf 'echo BURST_OK_MARKER\n'; sleep 1; printf '\x1d'")
+
+    # Connection must not be corrupted by the rapid interleaving
+    [[ "$OUTPUT" != *"frame too large"* ]]
+    [[ "$OUTPUT" != *"Connection reset"* ]]
+    [[ "$OUTPUT" != *"server disconnected"* ]]
+    # Session must still be responsive after the burst
+    [[ "$OUTPUT" == *"BURST_OK_MARKER"* ]]
+    [[ "$OUTPUT" == *"detached"* ]]
+}
+
 @test "resize propagates to PTY" {
     run "$VEX" create --shell /bin/sh
     [ "$status" -eq 0 ]

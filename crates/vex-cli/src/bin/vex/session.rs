@@ -158,17 +158,36 @@ pub async fn session_attach(port: u16, id_prefix: &str) -> Result<()> {
         }
     });
 
+    // Spawn frame reader task (read_frame is not cancel-safe in tokio::select!)
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<Frame>>(64);
+    let frame_handle = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut reader).await {
+                Ok(Some(frame)) => {
+                    if frame_tx.send(Ok(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+    });
+
     // Main loop: multiplex stdin, resize signals, and server frames
     let result: Result<()> = loop {
         tokio::select! {
-            frame = read_frame(&mut reader) => {
-                match frame {
-                    Ok(Some(Frame::Data(data))) => {
+            result = frame_rx.recv() => {
+                match result {
+                    Some(Ok(Frame::Data(data))) => {
                         let mut stdout = std::io::stdout().lock();
                         let _ = stdout.write_all(&data);
                         let _ = stdout.flush();
                     }
-                    Ok(Some(Frame::Control(data))) => {
+                    Some(Ok(Frame::Control(data))) => {
                         let msg: ServerMessage = serde_json::from_slice(&data)?;
                         match msg {
                             ServerMessage::Detached => {
@@ -186,12 +205,12 @@ pub async fn session_attach(port: u16, id_prefix: &str) -> Result<()> {
                             _ => {}
                         }
                     }
-                    Ok(None) => {
+                    Some(Err(e)) => {
+                        break Err(e);
+                    }
+                    None => {
                         eprintln!("\r\n[server disconnected]\r");
                         break Ok(());
-                    }
-                    Err(e) => {
-                        break Err(e);
                     }
                 }
             }
@@ -215,6 +234,7 @@ pub async fn session_attach(port: u16, id_prefix: &str) -> Result<()> {
 
     stdin_handle.abort();
     sigwinch_handle.abort();
+    frame_handle.abort();
 
     // Restore terminal before exiting
     drop(_raw_guard);

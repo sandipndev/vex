@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 use uuid::Uuid;
 use vex_cli::proto::{
@@ -26,15 +26,44 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'stati
     }
 }
 
-async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
+async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     manager: &SessionManager,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (reader, mut writer) = tokio::io::split(stream);
+
+    // Spawn frame reader task (read_frame is not cancel-safe in tokio::select!)
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Result<Frame>>(64);
+    let frame_handle = tokio::spawn(async move {
+        let mut reader = reader;
+        loop {
+            match read_frame(&mut reader).await {
+                Ok(Some(frame)) => {
+                    if frame_tx.send(Ok(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+    });
 
     let mut attached: Option<AttachState> = None;
-    let result = connection_loop(client_id, &mut reader, &mut writer, &mut attached, manager).await;
+    let result = connection_loop(
+        client_id,
+        &mut frame_rx,
+        &mut writer,
+        &mut attached,
+        manager,
+    )
+    .await;
+
+    frame_handle.abort();
 
     // Ensure we unregister the client on any exit path
     if let Some(state) = attached {
@@ -44,9 +73,9 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
     result
 }
 
-async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+async fn connection_loop<W: AsyncWrite + Unpin>(
     client_id: Uuid,
-    reader: &mut R,
+    frame_rx: &mut mpsc::Receiver<Result<Frame>>,
     writer: &mut W,
     attached: &mut Option<AttachState>,
     manager: &SessionManager,
@@ -56,13 +85,9 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             let session_id = state.session_id;
             // Attached state: select on client frames, session output, or events
             tokio::select! {
-                frame = read_frame(reader) => {
-                    match frame? {
-                        None => {
-                            info!("client {} disconnected while attached to {}", client_id, session_id);
-                            break;
-                        }
-                        Some(Frame::Data(data)) => {
+                result = frame_rx.recv() => {
+                    match result {
+                        Some(Ok(Frame::Data(data))) => {
                             if let Err(e) = manager.write_input(session_id, &data).await {
                                 warn!("write_input error: {}", e);
                                 send_server_message(
@@ -75,7 +100,7 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                 *attached = None;
                             }
                         }
-                        Some(Frame::Control(data)) => {
+                        Some(Ok(Frame::Control(data))) => {
                             let msg: ClientMessage = serde_json::from_slice(&data)?;
                             match msg {
                                 ClientMessage::DetachSession => {
@@ -112,6 +137,11 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                 }
                             }
                         }
+                        Some(Err(e)) => return Err(e),
+                        None => {
+                            info!("client {} disconnected while attached to {}", client_id, session_id);
+                            break;
+                        }
                     }
                 }
                 output = state.output_rx.recv() => {
@@ -145,12 +175,8 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             }
         } else {
             // Idle state: only read client frames
-            match read_frame(reader).await? {
-                None => {
-                    info!("client {} disconnected", client_id);
-                    break;
-                }
-                Some(Frame::Control(data)) => {
+            match frame_rx.recv().await {
+                Some(Ok(Frame::Control(data))) => {
                     let msg: ClientMessage = serde_json::from_slice(&data)?;
                     if let ClientMessage::AttachSession { id, cols, rows } = msg {
                         match manager.attach_session(id).await {
@@ -182,7 +208,7 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                         handle_control_idle(msg, manager, writer).await?;
                     }
                 }
-                Some(Frame::Data(_)) => {
+                Some(Ok(Frame::Data(_))) => {
                     send_server_message(
                         writer,
                         &ServerMessage::Error {
@@ -190,6 +216,11 @@ async fn connection_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                         },
                     )
                     .await?;
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    info!("client {} disconnected", client_id);
+                    break;
                 }
             }
         }
