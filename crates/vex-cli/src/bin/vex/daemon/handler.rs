@@ -54,8 +54,14 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
     });
 
     let mut attached: Option<AttachState> = None;
-    let result =
-        connection_loop(client_id, &mut frame_rx, &mut writer, &mut attached, manager).await;
+    let result = connection_loop(
+        client_id,
+        &mut frame_rx,
+        &mut writer,
+        &mut attached,
+        manager,
+    )
+    .await;
 
     frame_handle.abort();
 
