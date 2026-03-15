@@ -642,7 +642,7 @@ attach_via_pty() {
 @test "repo introspect-path on git repo" {
     mkdir -p "$TEST_TMPDIR/myrepo"
     git -C "$TEST_TMPDIR/myrepo" init --quiet
-    git -C "$TEST_TMPDIR/myrepo" commit --allow-empty -m "init" --quiet
+    git -C "$TEST_TMPDIR/myrepo" -c user.name=test -c user.email=test@test commit --allow-empty -m "init" --quiet
 
     run "$VEX" repo introspect-path "$TEST_TMPDIR/myrepo"
     [ "$status" -eq 0 ]
@@ -678,7 +678,7 @@ attach_via_pty() {
 setup_git_repo() {
     mkdir -p "$TEST_TMPDIR/myrepo"
     git -C "$TEST_TMPDIR/myrepo" init --quiet
-    git -C "$TEST_TMPDIR/myrepo" commit --allow-empty -m "init" --quiet
+    git -C "$TEST_TMPDIR/myrepo" -c user.name=test -c user.email=test@test commit --allow-empty -m "init" --quiet
     "$VEX" repo add myrepo "$TEST_TMPDIR/myrepo"
 }
 
@@ -711,7 +711,7 @@ setup_git_repo() {
     # Create another repo + workstream
     mkdir -p "$TEST_TMPDIR/other"
     git -C "$TEST_TMPDIR/other" init --quiet
-    git -C "$TEST_TMPDIR/other" commit --allow-empty -m "init" --quiet
+    git -C "$TEST_TMPDIR/other" -c user.name=test -c user.email=test@test commit --allow-empty -m "init" --quiet
     "$VEX" repo add other "$TEST_TMPDIR/other"
     "$VEX" workstream create -r other ws-a
 
