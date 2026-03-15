@@ -74,11 +74,6 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Attach to a session
-    Attach {
-        /// Session ID or unique prefix
-        id: String,
-    },
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -491,9 +486,6 @@ async fn main() -> Result<()> {
                 agent::agent_prompt(effective_port, &id, &text, show_thinking).await?;
             }
         },
-        Command::Attach { id } => {
-            session::session_attach(effective_port, &id).await?;
-        }
         _ => unreachable!(),
     }
 
