@@ -345,11 +345,7 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                 )
                 .await?;
             } else {
-                send_server_message(
-                    writer,
-                    &ServerMessage::AgentPromptSent { session_id },
-                )
-                .await?;
+                send_server_message(writer, &ServerMessage::AgentPromptSent { session_id }).await?;
                 // Stream conversation lines until the agent finishes its turn
                 handle_agent_watch(session_id, agent_store, writer, true).await?;
             }
@@ -483,11 +479,8 @@ async fn handle_agent_watch<W: AsyncWrite + Unpin>(
                         seen_non_assistant = true;
                     } else if seen_non_assistant {
                         // Agent finished its turn
-                        send_server_message(
-                            writer,
-                            &ServerMessage::AgentWatchEnd { session_id },
-                        )
-                        .await?;
+                        send_server_message(writer, &ServerMessage::AgentWatchEnd { session_id })
+                            .await?;
                         return Ok(());
                     }
                 }
