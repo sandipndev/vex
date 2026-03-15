@@ -547,20 +547,23 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Command::Repo { command } => match command {
-            RepoCommand::Add { name, path } => {
-                repo::repo_add(effective_port, &name, &path).await?;
+        Command::Repo { command } => {
+            let is_local = effective_port == port;
+            match command {
+                RepoCommand::Add { name, path } => {
+                    repo::repo_add(effective_port, &name, &path, is_local).await?;
+                }
+                RepoCommand::Remove { name } => {
+                    repo::repo_remove(effective_port, &name).await?;
+                }
+                RepoCommand::List => {
+                    repo::repo_list(effective_port).await?;
+                }
+                RepoCommand::IntrospectPath { path } => {
+                    repo::repo_introspect_path(effective_port, &path, is_local).await?;
+                }
             }
-            RepoCommand::Remove { name } => {
-                repo::repo_remove(effective_port, &name).await?;
-            }
-            RepoCommand::List => {
-                repo::repo_list(effective_port).await?;
-            }
-            RepoCommand::IntrospectPath { path } => {
-                repo::repo_introspect_path(effective_port, &path).await?;
-            }
-        },
+        }
         _ => unreachable!(),
     }
 

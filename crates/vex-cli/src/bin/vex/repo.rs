@@ -5,10 +5,11 @@ use vex_cli::proto::{ClientMessage, ServerMessage};
 
 use super::client::request;
 
-/// Make a relative path absolute using the client's cwd.
-/// The daemon will canonicalize (resolve symlinks, verify existence).
-fn resolve_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
+/// Make a relative path absolute using the client's cwd, but only when
+/// talking to the local daemon. For remote daemons, send the path as-is
+/// so the daemon resolves it on the remote filesystem.
+fn resolve_path(path: &Path, is_local: bool) -> PathBuf {
+    if !is_local || path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
@@ -17,8 +18,8 @@ fn resolve_path(path: &Path) -> PathBuf {
     }
 }
 
-pub async fn repo_add(port: u16, name: &str, path: &Path) -> Result<()> {
-    let path = resolve_path(path);
+pub async fn repo_add(port: u16, name: &str, path: &Path, is_local: bool) -> Result<()> {
+    let path = resolve_path(path, is_local);
     let resp = request(
         port,
         &ClientMessage::RepoAdd {
@@ -74,8 +75,8 @@ pub async fn repo_list(port: u16) -> Result<()> {
     }
 }
 
-pub async fn repo_introspect_path(port: u16, path: &Path) -> Result<()> {
-    let path = resolve_path(path);
+pub async fn repo_introspect_path(port: u16, path: &Path, is_local: bool) -> Result<()> {
+    let path = resolve_path(path, is_local);
     let resp = request(port, &ClientMessage::RepoIntrospectPath { path }).await?;
     match resp {
         ServerMessage::RepoIntrospected {
