@@ -35,7 +35,8 @@ impl RepoStoreInner {
         }
         let path = std::fs::canonicalize(&path)?;
         // Check for duplicate name (allow overwrite) but reject duplicate path
-        if let Some((existing_name, _)) = self.repos.iter().find(|(n, p)| **p == path && **n != name)
+        if let Some((existing_name, _)) =
+            self.repos.iter().find(|(n, p)| **p == path && **n != name)
         {
             bail!(
                 "path '{}' is already registered as repo '{}'",
