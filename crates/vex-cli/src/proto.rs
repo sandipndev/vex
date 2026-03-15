@@ -37,6 +37,7 @@ pub enum ServerMessage {
     ClientLeft { session_id: Uuid, client_id: Uuid },
     Error { message: String },
     AgentListResponse { agents: Vec<AgentEntry> },
+    AgentPromptSent { session_id: Uuid },
     AgentConversationLine { session_id: Uuid, line: String },
     AgentWatchEnd { session_id: Uuid },
 }
@@ -212,6 +213,9 @@ mod tests {
                     detected_at: Utc::now(),
                     needs_intervention: true,
                 }],
+            },
+            ServerMessage::AgentPromptSent {
+                session_id: Uuid::nil(),
             },
             ServerMessage::AgentConversationLine {
                 session_id: Uuid::nil(),
