@@ -95,6 +95,25 @@ pub async fn agent_watch(port: u16, session_id_prefix: &str, show_thinking: bool
     Ok(())
 }
 
+pub async fn agent_spawn(port: u16, repo: &str) -> Result<String> {
+    let resp = request(
+        port,
+        &ClientMessage::AgentSpawn {
+            repo: repo.to_string(),
+        },
+    )
+    .await?;
+    match resp {
+        ServerMessage::SessionCreated { id } => {
+            let id_str = id.to_string();
+            println!("{}", id_str);
+            Ok(id_str)
+        }
+        ServerMessage::Error { message } => bail!("{}", message),
+        other => bail!("unexpected response: {:?}", other),
+    }
+}
+
 pub async fn agent_prompt(
     port: u16,
     session_id_prefix: &str,

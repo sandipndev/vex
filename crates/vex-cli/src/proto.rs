@@ -41,6 +41,9 @@ pub enum ClientMessage {
         session_id: Uuid,
         text: String,
     },
+    AgentSpawn {
+        repo: String,
+    },
     RepoAdd {
         name: String,
         path: PathBuf,
@@ -244,6 +247,7 @@ mod tests {
                 session_id: Uuid::nil(),
                 text: "hello".into(),
             },
+            ClientMessage::AgentSpawn { repo: "vex".into() },
             ClientMessage::RepoAdd {
                 name: "vex".into(),
                 path: PathBuf::from("/tmp/vex"),

@@ -10,6 +10,7 @@ use vex_cli::proto::{
 };
 
 use super::agent::AgentStore;
+use super::config::VexConfig;
 use super::repo::RepoStore;
 use super::session::SessionManager;
 
@@ -24,8 +25,11 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'stati
     manager: Arc<SessionManager>,
     agent_store: AgentStore,
     repo_store: RepoStore,
+    config: Arc<VexConfig>,
 ) {
-    if let Err(e) = handle_connection_inner(stream, &manager, &agent_store, &repo_store).await {
+    if let Err(e) =
+        handle_connection_inner(stream, &manager, &agent_store, &repo_store, &config).await
+    {
         warn!("connection handler error: {}", e);
     }
 }
@@ -35,6 +39,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
     manager: &SessionManager,
     agent_store: &AgentStore,
     repo_store: &RepoStore,
+    config: &VexConfig,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
     let (reader, mut writer) = tokio::io::split(stream);
@@ -68,6 +73,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
         manager,
         agent_store,
         repo_store,
+        config,
     )
     .await;
 
@@ -81,6 +87,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connection_loop<W: AsyncWrite + Unpin>(
     client_id: Uuid,
     frame_rx: &mut mpsc::Receiver<Result<Frame>>,
@@ -89,6 +96,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
     manager: &SessionManager,
     agent_store: &AgentStore,
     repo_store: &RepoStore,
+    config: &VexConfig,
 ) -> Result<()> {
     loop {
         if let Some(state) = attached {
@@ -144,7 +152,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                                     }
                                 }
                                 other => {
-                                    handle_control_idle(other, manager, agent_store, repo_store, writer).await?;
+                                    handle_control_idle(other, manager, agent_store, repo_store, config, writer).await?;
                                 }
                             }
                         }
@@ -216,7 +224,8 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                             }
                         }
                     } else {
-                        handle_control_idle(msg, manager, agent_store, repo_store, writer).await?;
+                        handle_control_idle(msg, manager, agent_store, repo_store, config, writer)
+                            .await?;
                     }
                 }
                 Some(Ok(Frame::Data(_))) => {
@@ -245,6 +254,7 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
     manager: &SessionManager,
     agent_store: &AgentStore,
     repo_store: &RepoStore,
+    config: &VexConfig,
     writer: &mut W,
 ) -> Result<()> {
     match msg {
@@ -433,6 +443,45 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                 },
             )
             .await?;
+        }
+        ClientMessage::AgentSpawn { repo } => {
+            // Resolve repo → working directory
+            let working_dir = {
+                let store = repo_store.lock().await;
+                match store.get(&repo) {
+                    Some(path) => path,
+                    None => {
+                        send_server_message(
+                            writer,
+                            &ServerMessage::Error {
+                                message: format!("repo '{}' not found", repo),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            };
+            // Get agent command from config
+            let command = config.agent_command_for(&repo);
+            match manager
+                .create_session_with_command(command, 80, 24, Some(working_dir))
+                .await
+            {
+                Ok(id) => {
+                    info!("spawned agent session {} for repo '{}'", id, repo);
+                    send_server_message(writer, &ServerMessage::SessionCreated { id }).await?;
+                }
+                Err(e) => {
+                    send_server_message(
+                        writer,
+                        &ServerMessage::Error {
+                            message: format!("failed to spawn agent: {}", e),
+                        },
+                    )
+                    .await?;
+                }
+            }
         }
     }
     Ok(())
