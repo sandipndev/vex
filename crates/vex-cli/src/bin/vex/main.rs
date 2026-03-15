@@ -151,6 +151,15 @@ enum AgentCommand {
         #[arg(long)]
         show_thinking: bool,
     },
+    /// Spawn a Claude Code agent in a repo
+    Spawn {
+        /// Repository name
+        #[arg(short = 'r', long = "repo")]
+        repo: String,
+        /// Attach to the session immediately
+        #[arg(short, long)]
+        attach: bool,
+    },
     /// Send a prompt to a Claude Code agent
     Prompt {
         /// Vex session ID or unique prefix
@@ -527,6 +536,15 @@ async fn main() -> Result<()> {
                 show_thinking,
             } => {
                 agent::agent_prompt(effective_port, &id, &text, watch, show_thinking).await?;
+            }
+            AgentCommand::Spawn { repo, attach } => {
+                let (target_port, resolved_repo) =
+                    resolve_repo_for_create(Some(repo), effective_port, port, &vex_dir).await?;
+                let resolved_repo = resolved_repo.expect("repo was Some");
+                let id = agent::agent_spawn(target_port, &resolved_repo).await?;
+                if attach {
+                    session::session_attach(target_port, &id).await?;
+                }
             }
         },
         Command::Repo { command } => match command {

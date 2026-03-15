@@ -46,12 +46,39 @@ impl SessionManager {
     ) -> Result<Uuid> {
         let shell = shell
             .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
+        self.spawn_session(vec![shell], cols, rows, working_dir)
+            .await
+    }
 
+    /// Create a session running a custom command (program + args).
+    pub async fn create_session_with_command(
+        &self,
+        command: Vec<String>,
+        cols: u16,
+        rows: u16,
+        working_dir: Option<std::path::PathBuf>,
+    ) -> Result<Uuid> {
+        if command.is_empty() {
+            bail!("command must not be empty");
+        }
+        self.spawn_session(command, cols, rows, working_dir).await
+    }
+
+    async fn spawn_session(
+        &self,
+        command: Vec<String>,
+        cols: u16,
+        rows: u16,
+        working_dir: Option<std::path::PathBuf>,
+    ) -> Result<Uuid> {
         let (pty, pts) = pty_process::open().map_err(|e| anyhow::anyhow!("{}", e))?;
         pty.resize(Size::new(rows, cols))
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let mut cmd = pty_process::Command::new(&shell);
+        let mut cmd = pty_process::Command::new(&command[0]);
+        for arg in &command[1..] {
+            cmd = cmd.arg(arg);
+        }
         if let Some(dir) = working_dir {
             cmd = cmd.current_dir(dir);
         }
