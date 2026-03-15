@@ -1,6 +1,7 @@
 mod agent;
 mod client;
 mod daemon;
+mod repo;
 mod session;
 
 use std::net::SocketAddr;
@@ -74,6 +75,11 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Manage repositories
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommand,
+    },
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -91,6 +97,9 @@ enum SessionCommand {
         /// Attach to the session immediately after creating it
         #[arg(short, long)]
         attach: bool,
+        /// Create session at a named repo's working directory
+        #[arg(short = 'r', long = "repo")]
+        repo: Option<String>,
     },
     /// List active sessions
     #[command(alias = "ls")]
@@ -166,6 +175,30 @@ enum RemoteCommand {
     /// Show current remote connection
     #[command(alias = "ls")]
     List,
+}
+
+#[derive(Subcommand)]
+enum RepoCommand {
+    /// Register a named repository
+    Add {
+        /// Repository name
+        name: String,
+        /// Path to the repository root
+        path: PathBuf,
+    },
+    /// Unregister a repository
+    Remove {
+        /// Repository name
+        name: String,
+    },
+    /// List registered repositories
+    #[command(alias = "ls")]
+    List,
+    /// Introspect a path for repository information
+    IntrospectPath {
+        /// Path to introspect
+        path: PathBuf,
+    },
 }
 
 // ── Daemon management ────────────────────────────────────────────
@@ -449,13 +482,19 @@ async fn main() -> Result<()> {
         .map(|c| c.tunnel_port)
         .unwrap_or(port);
 
-    // Phase 3: session commands
+    // Phase 3: commands routed through effective port
     match command {
         Command::Session { command } => match command {
-            SessionCommand::Create { shell, attach } => {
-                let id = session::session_create(effective_port, shell).await?;
+            SessionCommand::Create {
+                shell,
+                attach,
+                repo,
+            } => {
+                let (target_port, resolved_repo) =
+                    resolve_repo_for_create(repo, effective_port, port, &vex_dir).await?;
+                let id = session::session_create(target_port, shell, resolved_repo).await?;
                 if attach {
-                    session::session_attach(effective_port, &id).await?;
+                    session::session_attach(target_port, &id).await?;
                 }
             }
             SessionCommand::List => {
@@ -486,8 +525,93 @@ async fn main() -> Result<()> {
                 agent::agent_prompt(effective_port, &id, &text, show_thinking).await?;
             }
         },
+        Command::Repo { command } => match command {
+            RepoCommand::Add { name, path } => {
+                repo::repo_add(effective_port, &name, &path).await?;
+            }
+            RepoCommand::Remove { name } => {
+                repo::repo_remove(effective_port, &name).await?;
+            }
+            RepoCommand::List => {
+                repo::repo_list(effective_port).await?;
+            }
+            RepoCommand::IntrospectPath { path } => {
+                repo::repo_introspect_path(effective_port, &path).await?;
+            }
+        },
         _ => unreachable!(),
     }
 
     Ok(())
+}
+
+/// Resolve a repo name for session creation, handling local/remote disambiguation.
+///
+/// Returns (port_to_use, resolved_repo_name).
+async fn resolve_repo_for_create(
+    repo: Option<String>,
+    effective_port: u16,
+    local_port: u16,
+    vex_dir: &Path,
+) -> Result<(u16, Option<String>)> {
+    let Some(repo_name) = repo else {
+        return Ok((effective_port, None));
+    };
+
+    // Check for qualified name: "local/name" or "<host>/name"
+    if let Some((qualifier, name)) = repo_name.split_once('/') {
+        if qualifier == "local" {
+            return Ok((local_port, Some(name.to_string())));
+        }
+        // Check if qualifier matches the remote host
+        if let Some(conn) = load_saved_connection(vex_dir)
+            && conn.host == qualifier
+        {
+            return Ok((conn.tunnel_port, Some(name.to_string())));
+        }
+        bail!(
+            "unknown qualifier '{}' — use 'local/<name>' or '<remote-host>/<name>'",
+            qualifier
+        );
+    }
+
+    // Unqualified name — check if remote is connected
+    let remote = load_saved_connection(vex_dir);
+    if remote.is_none() {
+        // No remote, just use effective port
+        return Ok((effective_port, Some(repo_name)));
+    }
+
+    let conn = remote.unwrap();
+
+    // Query both local and remote for this repo name
+    let local_has = query_repo_exists(local_port, &repo_name)
+        .await
+        .unwrap_or(false);
+    let remote_has = query_repo_exists(conn.tunnel_port, &repo_name)
+        .await
+        .unwrap_or(false);
+
+    match (local_has, remote_has) {
+        (true, true) => bail!(
+            "ambiguous repo '{}' — exists on both local and '{}'. Use 'local/{}' or '{}/{}'",
+            repo_name,
+            conn.host,
+            repo_name,
+            conn.host,
+            repo_name,
+        ),
+        (true, false) => Ok((local_port, Some(repo_name))),
+        (false, true) => Ok((conn.tunnel_port, Some(repo_name))),
+        (false, false) => bail!("repo '{}' not found on local or '{}'", repo_name, conn.host),
+    }
+}
+
+async fn query_repo_exists(port: u16, name: &str) -> Result<bool> {
+    use vex_cli::proto::{ClientMessage, ServerMessage};
+    let resp = client::request(port, &ClientMessage::RepoList).await?;
+    match resp {
+        ServerMessage::Repos { repos } => Ok(repos.iter().any(|r| r.name == name)),
+        _ => Ok(false),
+    }
 }

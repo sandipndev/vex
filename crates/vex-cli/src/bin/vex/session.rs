@@ -9,8 +9,12 @@ use vex_cli::proto::{
 
 use super::client::{connect, request};
 
-pub async fn session_create(port: u16, shell: Option<String>) -> Result<String> {
-    let resp = request(port, &ClientMessage::CreateSession { shell }).await?;
+pub async fn session_create(
+    port: u16,
+    shell: Option<String>,
+    repo: Option<String>,
+) -> Result<String> {
+    let resp = request(port, &ClientMessage::CreateSession { shell, repo }).await?;
     match resp {
         ServerMessage::SessionCreated { id } => {
             let id_str = id.to_string();

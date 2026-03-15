@@ -1,5 +1,6 @@
 mod agent;
 mod handler;
+mod repo;
 mod session;
 
 use std::path::Path;
@@ -10,6 +11,7 @@ use tokio::net::TcpListener;
 use tracing::{error, info};
 
 use agent::{new_agent_store, spawn_detection_task};
+use repo::new_repo_store;
 use session::SessionManager;
 
 pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
@@ -18,6 +20,7 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
 
     let manager = Arc::new(SessionManager::new());
     let agent_store = new_agent_store();
+    let repo_store = new_repo_store(vex_dir);
 
     // Start agent detection background task
     spawn_detection_task(Arc::clone(&manager), Arc::clone(&agent_store));
@@ -53,8 +56,9 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
                 info!("new connection from {}", addr);
                 let manager = Arc::clone(&manager);
                 let agent_store = Arc::clone(&agent_store);
+                let repo_store = Arc::clone(&repo_store);
                 tokio::spawn(async move {
-                    handler::handle_connection(stream, manager, agent_store).await;
+                    handler::handle_connection(stream, manager, agent_store, repo_store).await;
                 });
             }
             Err(e) => {

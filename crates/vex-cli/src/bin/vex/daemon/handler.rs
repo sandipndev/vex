@@ -10,6 +10,7 @@ use vex_cli::proto::{
 };
 
 use super::agent::AgentStore;
+use super::repo::RepoStore;
 use super::session::SessionManager;
 
 struct AttachState {
@@ -22,8 +23,9 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'stati
     stream: S,
     manager: Arc<SessionManager>,
     agent_store: AgentStore,
+    repo_store: RepoStore,
 ) {
-    if let Err(e) = handle_connection_inner(stream, &manager, &agent_store).await {
+    if let Err(e) = handle_connection_inner(stream, &manager, &agent_store, &repo_store).await {
         warn!("connection handler error: {}", e);
     }
 }
@@ -32,6 +34,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
     stream: S,
     manager: &SessionManager,
     agent_store: &AgentStore,
+    repo_store: &RepoStore,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
     let (reader, mut writer) = tokio::io::split(stream);
@@ -64,6 +67,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
         &mut attached,
         manager,
         agent_store,
+        repo_store,
     )
     .await;
 
@@ -84,6 +88,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
     attached: &mut Option<AttachState>,
     manager: &SessionManager,
     agent_store: &AgentStore,
+    repo_store: &RepoStore,
 ) -> Result<()> {
     loop {
         if let Some(state) = attached {
@@ -139,7 +144,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                                     }
                                 }
                                 other => {
-                                    handle_control_idle(other, manager, agent_store, writer).await?;
+                                    handle_control_idle(other, manager, agent_store, repo_store, writer).await?;
                                 }
                             }
                         }
@@ -211,7 +216,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                             }
                         }
                     } else {
-                        handle_control_idle(msg, manager, agent_store, writer).await?;
+                        handle_control_idle(msg, manager, agent_store, repo_store, writer).await?;
                     }
                 }
                 Some(Ok(Frame::Data(_))) => {
@@ -239,11 +244,31 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
     msg: ClientMessage,
     manager: &SessionManager,
     agent_store: &AgentStore,
+    repo_store: &RepoStore,
     writer: &mut W,
 ) -> Result<()> {
     match msg {
-        ClientMessage::CreateSession { shell } => {
-            match manager.create_session(shell, 80, 24).await {
+        ClientMessage::CreateSession { shell, repo } => {
+            // Resolve repo name to a working directory
+            let working_dir = if let Some(ref name) = repo {
+                let store = repo_store.lock().await;
+                match store.get(name) {
+                    Some(path) => Some(path),
+                    None => {
+                        send_server_message(
+                            writer,
+                            &ServerMessage::Error {
+                                message: format!("repo '{}' not found", name),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            };
+            match manager.create_session(shell, 80, 24, working_dir).await {
                 Ok(id) => {
                     info!("created session {}", id);
                     send_server_message(writer, &ServerMessage::SessionCreated { id }).await?;
@@ -349,6 +374,67 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                 // Stream conversation lines until the agent finishes its turn
                 handle_agent_watch(session_id, agent_store, writer, true).await?;
             }
+        }
+        ClientMessage::RepoAdd { name, path } => {
+            let mut store = repo_store.lock().await;
+            match store.add(name.clone(), path.clone()) {
+                Ok(()) => {
+                    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+                    send_server_message(
+                        writer,
+                        &ServerMessage::RepoAdded {
+                            name,
+                            path: canonical,
+                        },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    send_server_message(
+                        writer,
+                        &ServerMessage::Error {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        ClientMessage::RepoRemove { name } => {
+            let mut store = repo_store.lock().await;
+            match store.remove(&name) {
+                Ok(()) => {
+                    send_server_message(writer, &ServerMessage::RepoRemoved { name }).await?;
+                }
+                Err(e) => {
+                    send_server_message(
+                        writer,
+                        &ServerMessage::Error {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        ClientMessage::RepoList => {
+            let store = repo_store.lock().await;
+            let repos = store.list();
+            send_server_message(writer, &ServerMessage::Repos { repos }).await?;
+        }
+        ClientMessage::RepoIntrospectPath { path } => {
+            let (suggested_name, canonical, git_remote, git_branch) =
+                super::repo::introspect_path(&path);
+            send_server_message(
+                writer,
+                &ServerMessage::RepoIntrospected {
+                    suggested_name,
+                    path: canonical,
+                    git_remote,
+                    git_branch,
+                },
+            )
+            .await?;
         }
     }
     Ok(())
