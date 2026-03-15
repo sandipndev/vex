@@ -11,6 +11,8 @@ pub struct VexConfig {
     pub default_agent_command: String,
     #[serde(default)]
     pub repos: HashMap<String, RepoConfig>,
+    #[serde(default)]
+    pub hooks: HooksConfig,
 }
 
 impl Default for VexConfig {
@@ -18,6 +20,7 @@ impl Default for VexConfig {
         Self {
             default_agent_command: default_agent_command(),
             repos: HashMap::new(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -25,6 +28,17 @@ impl Default for VexConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RepoConfig {
     pub agent_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HooksConfig {
+    pub on_workstream_create: Option<HookDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookDef {
+    #[serde(rename = "do")]
+    pub commands: Vec<String>,
 }
 
 fn default_agent_command() -> String {

@@ -586,3 +586,178 @@ attach_via_pty() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"compdef"* ]]
 }
+
+# ═══════════════════════════════════════════════════════════════════
+#  Repo management
+# ═══════════════════════════════════════════════════════════════════
+
+@test "repo list: empty" {
+    run "$VEX" repo list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no repos"* ]]
+}
+
+@test "repo add and list" {
+    mkdir -p "$TEST_TMPDIR/myrepo"
+    run "$VEX" repo add myrepo "$TEST_TMPDIR/myrepo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"added repo"* ]]
+
+    run "$VEX" repo list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"myrepo"* ]]
+}
+
+@test "repo add: nonexistent path fails" {
+    run vex repo add bad "$TEST_TMPDIR/nonexistent"
+    [ "$status" -ne 0 ]
+}
+
+@test "repo add: duplicate path fails" {
+    mkdir -p "$TEST_TMPDIR/myrepo"
+    "$VEX" repo add first "$TEST_TMPDIR/myrepo"
+
+    run vex repo add second "$TEST_TMPDIR/myrepo"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"already registered"* ]]
+}
+
+@test "repo remove" {
+    mkdir -p "$TEST_TMPDIR/myrepo"
+    "$VEX" repo add myrepo "$TEST_TMPDIR/myrepo"
+
+    run "$VEX" repo remove myrepo
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"removed"* ]]
+
+    run "$VEX" repo list
+    [[ "$output" == *"no repos"* ]]
+}
+
+@test "repo remove: nonexistent fails" {
+    run vex repo remove nope
+    [ "$status" -ne 0 ]
+}
+
+@test "repo introspect-path on git repo" {
+    mkdir -p "$TEST_TMPDIR/myrepo"
+    git -C "$TEST_TMPDIR/myrepo" init --quiet
+    git -C "$TEST_TMPDIR/myrepo" -c user.name=test -c user.email=test@test commit --allow-empty -m "init" --quiet
+
+    run "$VEX" repo introspect-path "$TEST_TMPDIR/myrepo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Name:"* ]]
+    [[ "$output" == *"myrepo"* ]]
+    [[ "$output" == *"Path:"* ]]
+}
+
+@test "session create -r uses repo path" {
+    mkdir -p "$TEST_TMPDIR/myrepo"
+    "$VEX" repo add myrepo "$TEST_TMPDIR/myrepo"
+
+    run "$VEX" session create -r myrepo --shell /bin/sh
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ $UUID_RE ]]
+    SID="$output"
+
+    # Verify the shell started in the repo directory
+    OUTPUT=$(attach_via_pty "$SID" "sleep 0.5; printf 'pwd\n'; sleep 1; printf '\x1d'")
+    [[ "$OUTPUT" == *"myrepo"* ]]
+}
+
+@test "session create -r nonexistent repo fails" {
+    run vex session create -r nope
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Workstream management
+# ═══════════════════════════════════════════════════════════════════
+
+setup_git_repo() {
+    mkdir -p "$TEST_TMPDIR/myrepo"
+    git -C "$TEST_TMPDIR/myrepo" init --quiet
+    git -C "$TEST_TMPDIR/myrepo" -c user.name=test -c user.email=test@test commit --allow-empty -m "init" --quiet
+    "$VEX" repo add myrepo "$TEST_TMPDIR/myrepo"
+}
+
+@test "workstream list: empty" {
+    run "$VEX" workstream list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no workstreams"* ]]
+}
+
+@test "workstream create and list" {
+    setup_git_repo
+
+    run "$VEX" workstream create -r myrepo feat-1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"created workstream"* ]]
+
+    # Worktree directory should exist
+    [ -d "$VEX_DIR/workstreams/myrepo/feat-1" ]
+
+    run "$VEX" workstream list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"myrepo"* ]]
+    [[ "$output" == *"feat-1"* ]]
+}
+
+@test "workstream list -r filters by repo" {
+    setup_git_repo
+    "$VEX" workstream create -r myrepo feat-1
+
+    # Create another repo + workstream
+    mkdir -p "$TEST_TMPDIR/other"
+    git -C "$TEST_TMPDIR/other" init --quiet
+    git -C "$TEST_TMPDIR/other" -c user.name=test -c user.email=test@test commit --allow-empty -m "init" --quiet
+    "$VEX" repo add other "$TEST_TMPDIR/other"
+    "$VEX" workstream create -r other ws-a
+
+    run "$VEX" workstream list -r myrepo
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"feat-1"* ]]
+    [[ "$output" != *"ws-a"* ]]
+}
+
+@test "workstream create: duplicate fails" {
+    setup_git_repo
+    "$VEX" workstream create -r myrepo feat-1
+
+    run vex workstream create -r myrepo feat-1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"already exists"* ]]
+}
+
+@test "workstream create: nonexistent repo fails" {
+    run vex workstream create -r nope feat-1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "workstream remove" {
+    setup_git_repo
+    "$VEX" workstream create -r myrepo feat-1
+
+    run "$VEX" workstream remove -r myrepo feat-1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"removed"* ]]
+
+    # Worktree directory should be gone
+    [ ! -d "$VEX_DIR/workstreams/myrepo/feat-1" ]
+
+    run "$VEX" workstream list
+    [[ "$output" == *"no workstreams"* ]]
+}
+
+@test "workstream remove: nonexistent fails" {
+    run vex workstream remove -r nope feat-1
+    [ "$status" -ne 0 ]
+}
+
+@test "ws alias works" {
+    run "$VEX" ws list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no workstreams"* ]]
+}

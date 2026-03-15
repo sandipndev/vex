@@ -3,6 +3,7 @@ pub mod config;
 mod handler;
 mod repo;
 mod session;
+mod workstream;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use agent::{new_agent_store, spawn_detection_task};
 use config::VexConfig;
 use repo::new_repo_store;
 use session::SessionManager;
+use workstream::new_workstream_store;
 
 pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
@@ -23,6 +25,7 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
     let manager = Arc::new(SessionManager::new());
     let agent_store = new_agent_store();
     let repo_store = new_repo_store(vex_dir);
+    let workstream_store = new_workstream_store(vex_dir);
     let config = Arc::new(VexConfig::load(vex_dir));
 
     // Start agent detection background task
@@ -60,10 +63,18 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
                 let manager = Arc::clone(&manager);
                 let agent_store = Arc::clone(&agent_store);
                 let repo_store = Arc::clone(&repo_store);
+                let workstream_store = Arc::clone(&workstream_store);
                 let config = Arc::clone(&config);
                 tokio::spawn(async move {
-                    handler::handle_connection(stream, manager, agent_store, repo_store, config)
-                        .await;
+                    handler::handle_connection(
+                        stream,
+                        manager,
+                        agent_store,
+                        repo_store,
+                        workstream_store,
+                        config,
+                    )
+                    .await;
                 });
             }
             Err(e) => {

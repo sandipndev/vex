@@ -3,6 +3,7 @@ mod client;
 mod daemon;
 mod repo;
 mod session;
+mod workstream;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -80,6 +81,12 @@ enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
+    /// Manage workstreams (git worktrees)
+    #[command(alias = "ws")]
+    Workstream {
+        #[command(subcommand)]
+        command: WorkstreamCommand,
+    },
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -156,6 +163,9 @@ enum AgentCommand {
         /// Repository name
         #[arg(short = 'r', long = "repo")]
         repo: String,
+        /// Workstream to spawn in
+        #[arg(short = 'w', long = "workstream")]
+        workstream: Option<String>,
         /// Attach to the session immediately
         #[arg(short, long)]
         attach: bool,
@@ -210,6 +220,30 @@ enum RepoCommand {
     IntrospectPath {
         /// Path to introspect
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkstreamCommand {
+    /// Create a new workstream (git worktree + branch)
+    Create {
+        #[arg(short = 'r', long = "repo")]
+        repo: String,
+        /// Workstream name (also used as branch name)
+        name: String,
+    },
+    /// List workstreams
+    #[command(alias = "ls")]
+    List {
+        #[arg(short = 'r', long = "repo")]
+        repo: Option<String>,
+    },
+    /// Remove a workstream
+    Remove {
+        #[arg(short = 'r', long = "repo")]
+        repo: String,
+        /// Workstream name
+        name: String,
     },
 }
 
@@ -537,11 +571,16 @@ async fn main() -> Result<()> {
             } => {
                 agent::agent_prompt(effective_port, &id, &text, watch, show_thinking).await?;
             }
-            AgentCommand::Spawn { repo, attach } => {
+            AgentCommand::Spawn {
+                repo,
+                workstream,
+                attach,
+            } => {
                 let (target_port, resolved_repo) =
                     resolve_repo_for_create(Some(repo), effective_port, port, &vex_dir).await?;
                 let resolved_repo = resolved_repo.expect("repo was Some");
-                let id = agent::agent_spawn(target_port, &resolved_repo).await?;
+                let id =
+                    agent::agent_spawn(target_port, &resolved_repo, workstream.as_deref()).await?;
                 if attach {
                     session::session_attach(target_port, &id).await?;
                 }
@@ -564,6 +603,17 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Command::Workstream { command } => match command {
+            WorkstreamCommand::Create { repo, name } => {
+                workstream::workstream_create(effective_port, &repo, &name).await?;
+            }
+            WorkstreamCommand::List { repo } => {
+                workstream::workstream_list(effective_port, repo.as_deref()).await?;
+            }
+            WorkstreamCommand::Remove { repo, name } => {
+                workstream::workstream_remove(effective_port, &repo, &name).await?;
+            }
+        },
         _ => unreachable!(),
     }
 
