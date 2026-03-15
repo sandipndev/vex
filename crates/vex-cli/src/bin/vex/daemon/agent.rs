@@ -63,10 +63,7 @@ pub fn spawn_detection_task(manager: Arc<SessionManager>, store: AgentStore) {
     });
 }
 
-async fn detect_agents(
-    manager: &SessionManager,
-    store: &AgentStore,
-) -> anyhow::Result<()> {
+async fn detect_agents(manager: &SessionManager, store: &AgentStore) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
     let sessions_dir = home.join(".claude").join("sessions");
     let shell_pids = manager.shell_pids().await;
@@ -111,18 +108,22 @@ async fn detect_agents(
 
         // Walk the parent chain to see if any ancestor matches a vex shell PID
         if let Some(vex_session_id) = find_ancestor_match(claude_session.pid, &shell_pids) {
-            let jsonl_path = derive_jsonl_path(&home, &claude_session.cwd, &claude_session.session_id);
+            let jsonl_path =
+                derive_jsonl_path(&home, &claude_session.cwd, &claude_session.session_id);
             let needs_intervention = check_needs_intervention(&jsonl_path);
 
-            found.insert(vex_session_id, AgentInfo {
+            found.insert(
                 vex_session_id,
-                claude_session_id: claude_session.session_id,
-                claude_pid: claude_session.pid,
-                cwd: claude_session.cwd,
-                jsonl_path,
-                detected_at: Utc::now(),
-                needs_intervention,
-            });
+                AgentInfo {
+                    vex_session_id,
+                    claude_session_id: claude_session.session_id,
+                    claude_pid: claude_session.pid,
+                    cwd: claude_session.cwd,
+                    jsonl_path,
+                    detected_at: Utc::now(),
+                    needs_intervention,
+                },
+            );
         }
     }
 
@@ -214,9 +215,7 @@ fn check_needs_intervention(jsonl_path: &Path) -> bool {
 
 /// Derive the JSONL conversation file path from cwd and session ID.
 fn derive_jsonl_path(home: &Path, cwd: &Path, session_id: &str) -> PathBuf {
-    let encoded_cwd = cwd
-        .to_string_lossy()
-        .replace('/', "-");
+    let encoded_cwd = cwd.to_string_lossy().replace('/', "-");
     home.join(".claude")
         .join("projects")
         .join(&encoded_cwd)

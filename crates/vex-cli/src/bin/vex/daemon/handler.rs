@@ -310,8 +310,11 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
         ClientMessage::AgentList => {
             let agents = agent_store.lock().await;
             let entries = agents.values().map(|a| a.to_entry()).collect();
-            send_server_message(writer, &ServerMessage::AgentListResponse { agents: entries })
-                .await?;
+            send_server_message(
+                writer,
+                &ServerMessage::AgentListResponse { agents: entries },
+            )
+            .await?;
         }
         ClientMessage::AgentNotifications => {
             let agents = agent_store.lock().await;
@@ -320,8 +323,11 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                 .filter(|a| a.needs_intervention)
                 .map(|a| a.to_entry())
                 .collect();
-            send_server_message(writer, &ServerMessage::AgentListResponse { agents: entries })
-                .await?;
+            send_server_message(
+                writer,
+                &ServerMessage::AgentListResponse { agents: entries },
+            )
+            .await?;
         }
         ClientMessage::AgentWatch { session_id } => {
             handle_agent_watch(session_id, agent_store, writer).await?;
@@ -429,21 +435,13 @@ async fn handle_agent_watch<W: AsyncWrite + Unpin>(
         {
             let agents = agent_store.lock().await;
             if !agents.contains_key(&session_id) {
-                send_server_message(
-                    writer,
-                    &ServerMessage::AgentWatchEnd { session_id },
-                )
-                .await?;
+                send_server_message(writer, &ServerMessage::AgentWatchEnd { session_id }).await?;
                 return Ok(());
             }
         }
 
         // Wait for file modification with a timeout for periodic liveness checks
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            notify_rx.recv(),
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), notify_rx.recv()).await;
 
         // Read new lines
         reader.seek(SeekFrom::Start(pos))?;

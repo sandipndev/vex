@@ -64,11 +64,7 @@ pub async fn agent_watch(port: u16, session_id_prefix: &str, show_thinking: bool
     let stream = connect(port).await?;
     let (mut reader, mut writer) = io::split(stream);
 
-    send_client_message(
-        &mut writer,
-        &ClientMessage::AgentWatch { session_id },
-    )
-    .await?;
+    send_client_message(&mut writer, &ClientMessage::AgentWatch { session_id }).await?;
 
     loop {
         match read_frame(&mut reader).await? {
@@ -99,7 +95,12 @@ pub async fn agent_watch(port: u16, session_id_prefix: &str, show_thinking: bool
     Ok(())
 }
 
-pub async fn agent_prompt(port: u16, session_id_prefix: &str, text: &str, show_thinking: bool) -> Result<()> {
+pub async fn agent_prompt(
+    port: u16,
+    session_id_prefix: &str,
+    text: &str,
+    show_thinking: bool,
+) -> Result<()> {
     let session_id = resolve_agent_session(port, session_id_prefix).await?;
 
     // Send the prompt
@@ -187,7 +188,10 @@ fn format_assistant_content(content: &Value, show_thinking: bool) {
                         }
                     }
                     "tool_use" => {
-                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                        let name = item
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
                         let input = item.get("input").cloned().unwrap_or(Value::Null);
                         let summary = tool_summary(name, &input);
                         println!("{}", summary);
@@ -210,7 +214,10 @@ fn format_assistant_content(content: &Value, show_thinking: bool) {
 fn tool_summary(name: &str, input: &Value) -> String {
     match name {
         "Read" | "Edit" | "Write" => {
-            let path = input.get("file_path").and_then(|p| p.as_str()).unwrap_or("?");
+            let path = input
+                .get("file_path")
+                .and_then(|p| p.as_str())
+                .unwrap_or("?");
             format!("[tool: {}] {}", name, path)
         }
         "Bash" => {
