@@ -1,17 +1,29 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use vex_cli::proto::{ClientMessage, ServerMessage};
 
 use super::client::request;
 
+/// Make a relative path absolute using the client's cwd.
+/// The daemon will canonicalize (resolve symlinks, verify existence).
+fn resolve_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
 pub async fn repo_add(port: u16, name: &str, path: &Path) -> Result<()> {
-    let canonical = std::fs::canonicalize(path)?;
+    let path = resolve_path(path);
     let resp = request(
         port,
         &ClientMessage::RepoAdd {
             name: name.to_string(),
-            path: canonical,
+            path,
         },
     )
     .await?;
@@ -63,8 +75,8 @@ pub async fn repo_list(port: u16) -> Result<()> {
 }
 
 pub async fn repo_introspect_path(port: u16, path: &Path) -> Result<()> {
-    let canonical = std::fs::canonicalize(path)?;
-    let resp = request(port, &ClientMessage::RepoIntrospectPath { path: canonical }).await?;
+    let path = resolve_path(path);
+    let resp = request(port, &ClientMessage::RepoIntrospectPath { path }).await?;
     match resp {
         ServerMessage::RepoIntrospected {
             suggested_name,
