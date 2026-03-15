@@ -18,38 +18,93 @@ pub enum ClientMessage {
         repo: Option<String>,
     },
     ListSessions,
-    AttachSession { id: Uuid, cols: u16, rows: u16 },
+    AttachSession {
+        id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
     DetachSession,
-    ResizeSession { id: Uuid, cols: u16, rows: u16 },
-    KillSession { id: Uuid },
+    ResizeSession {
+        id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
+    KillSession {
+        id: Uuid,
+    },
     AgentList,
     AgentNotifications,
-    AgentWatch { session_id: Uuid },
-    AgentPrompt { session_id: Uuid, text: String },
-    RepoAdd { name: String, path: PathBuf },
-    RepoRemove { name: String },
+    AgentWatch {
+        session_id: Uuid,
+    },
+    AgentPrompt {
+        session_id: Uuid,
+        text: String,
+    },
+    RepoAdd {
+        name: String,
+        path: PathBuf,
+    },
+    RepoRemove {
+        name: String,
+    },
     RepoList,
-    RepoIntrospectPath { path: PathBuf },
+    RepoIntrospectPath {
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
-    SessionCreated { id: Uuid },
-    Sessions { sessions: Vec<SessionInfo> },
-    Attached { id: Uuid },
+    SessionCreated {
+        id: Uuid,
+    },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+    },
+    Attached {
+        id: Uuid,
+    },
     Detached,
-    SessionEnded { id: Uuid, exit_code: Option<i32> },
-    ClientJoined { session_id: Uuid, client_id: Uuid },
-    ClientLeft { session_id: Uuid, client_id: Uuid },
-    Error { message: String },
-    AgentListResponse { agents: Vec<AgentEntry> },
-    AgentPromptSent { session_id: Uuid },
-    AgentConversationLine { session_id: Uuid, line: String },
-    AgentWatchEnd { session_id: Uuid },
-    RepoAdded { name: String, path: PathBuf },
-    RepoRemoved { name: String },
-    Repos { repos: Vec<RepoEntry> },
+    SessionEnded {
+        id: Uuid,
+        exit_code: Option<i32>,
+    },
+    ClientJoined {
+        session_id: Uuid,
+        client_id: Uuid,
+    },
+    ClientLeft {
+        session_id: Uuid,
+        client_id: Uuid,
+    },
+    Error {
+        message: String,
+    },
+    AgentListResponse {
+        agents: Vec<AgentEntry>,
+    },
+    AgentPromptSent {
+        session_id: Uuid,
+    },
+    AgentConversationLine {
+        session_id: Uuid,
+        line: String,
+    },
+    AgentWatchEnd {
+        session_id: Uuid,
+    },
+    RepoAdded {
+        name: String,
+        path: PathBuf,
+    },
+    RepoRemoved {
+        name: String,
+    },
+    Repos {
+        repos: Vec<RepoEntry>,
+    },
     RepoIntrospected {
         suggested_name: String,
         path: PathBuf,
@@ -193,9 +248,7 @@ mod tests {
                 name: "vex".into(),
                 path: PathBuf::from("/tmp/vex"),
             },
-            ClientMessage::RepoRemove {
-                name: "vex".into(),
-            },
+            ClientMessage::RepoRemove { name: "vex".into() },
             ClientMessage::RepoList,
             ClientMessage::RepoIntrospectPath {
                 path: PathBuf::from("/tmp"),
@@ -262,9 +315,7 @@ mod tests {
                 name: "vex".into(),
                 path: PathBuf::from("/tmp/vex"),
             },
-            ServerMessage::RepoRemoved {
-                name: "vex".into(),
-            },
+            ServerMessage::RepoRemoved { name: "vex".into() },
             ServerMessage::Repos {
                 repos: vec![RepoEntry {
                     name: "vex".into(),

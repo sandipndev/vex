@@ -490,15 +490,9 @@ async fn main() -> Result<()> {
                 attach,
                 repo,
             } => {
-                let (target_port, resolved_repo) = resolve_repo_for_create(
-                    repo,
-                    effective_port,
-                    port,
-                    &vex_dir,
-                )
-                .await?;
-                let id =
-                    session::session_create(target_port, shell, resolved_repo).await?;
+                let (target_port, resolved_repo) =
+                    resolve_repo_for_create(repo, effective_port, port, &vex_dir).await?;
+                let id = session::session_create(target_port, shell, resolved_repo).await?;
                 if attach {
                     session::session_attach(target_port, &id).await?;
                 }

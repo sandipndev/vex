@@ -28,7 +28,10 @@ impl RepoStoreInner {
 
     pub fn add(&mut self, name: String, path: PathBuf) -> Result<()> {
         if !path.is_dir() {
-            bail!("path does not exist or is not a directory: {}", path.display());
+            bail!(
+                "path does not exist or is not a directory: {}",
+                path.display()
+            );
         }
         let path = std::fs::canonicalize(&path)?;
         self.repos.insert(name, path);

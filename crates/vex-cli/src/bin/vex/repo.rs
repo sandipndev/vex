@@ -64,11 +64,7 @@ pub async fn repo_list(port: u16) -> Result<()> {
 
 pub async fn repo_introspect_path(port: u16, path: &Path) -> Result<()> {
     let canonical = std::fs::canonicalize(path)?;
-    let resp = request(
-        port,
-        &ClientMessage::RepoIntrospectPath { path: canonical },
-    )
-    .await?;
+    let resp = request(port, &ClientMessage::RepoIntrospectPath { path: canonical }).await?;
     match resp {
         ServerMessage::RepoIntrospected {
             suggested_name,
