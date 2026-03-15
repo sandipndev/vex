@@ -223,8 +223,9 @@ fn check_needs_intervention(jsonl_path: &Path) -> bool {
 }
 
 /// Derive the JSONL conversation file path from cwd and session ID.
+/// Claude Code encodes the cwd by replacing `/` with `-` and removing `.` characters.
 fn derive_jsonl_path(home: &Path, cwd: &Path, session_id: &str) -> PathBuf {
-    let encoded_cwd = cwd.to_string_lossy().replace('/', "-");
+    let encoded_cwd = cwd.to_string_lossy().replace('/', "-").replace('.', "");
     home.join(".claude")
         .join("projects")
         .join(&encoded_cwd)
