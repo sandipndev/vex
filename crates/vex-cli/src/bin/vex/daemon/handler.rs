@@ -330,7 +330,7 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
             .await?;
         }
         ClientMessage::AgentWatch { session_id } => {
-            handle_agent_watch(session_id, agent_store, writer).await?;
+            handle_agent_watch(session_id, agent_store, writer, false).await?;
         }
         ClientMessage::AgentPrompt { session_id, text } => {
             // Write the prompt text + carriage return to the vex session's PTY
@@ -344,6 +344,10 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                     },
                 )
                 .await?;
+            } else {
+                send_server_message(writer, &ServerMessage::AgentPromptSent { session_id }).await?;
+                // Stream conversation lines until the agent finishes its turn
+                handle_agent_watch(session_id, agent_store, writer, true).await?;
             }
         }
     }
@@ -354,6 +358,7 @@ async fn handle_agent_watch<W: AsyncWrite + Unpin>(
     session_id: Uuid,
     agent_store: &AgentStore,
     writer: &mut W,
+    until_turn_complete: bool,
 ) -> Result<()> {
     use notify::{EventKind, RecursiveMode, Watcher};
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -431,6 +436,13 @@ async fn handle_agent_watch<W: AsyncWrite + Unpin>(
     // Current file position is at end from reading lines
     let mut pos = reader.stream_position()?;
 
+    // For turn completion detection: track whether we've seen a non-assistant
+    // line in new (non-replayed) lines. The sequence is:
+    // 1. Agent was idle (last line = "assistant")
+    // 2. Prompt sent → "user" line appears → seen_non_assistant = true
+    // 3. Agent responds → "assistant" line appears → turn complete
+    let mut seen_non_assistant = false;
+
     loop {
         // Check if agent is still alive
         {
@@ -454,10 +466,24 @@ async fn handle_agent_watch<W: AsyncWrite + Unpin>(
                     writer,
                     &ServerMessage::AgentConversationLine {
                         session_id,
-                        line: trimmed,
+                        line: trimmed.clone(),
                     },
                 )
                 .await?;
+
+                if until_turn_complete
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&trimmed)
+                    && let Some(t) = v.get("type").and_then(|t| t.as_str())
+                {
+                    if t != "assistant" {
+                        seen_non_assistant = true;
+                    } else if seen_non_assistant {
+                        // Agent finished its turn
+                        send_server_message(writer, &ServerMessage::AgentWatchEnd { session_id })
+                            .await?;
+                        return Ok(());
+                    }
+                }
             }
             line_buf.clear();
         }
