@@ -40,7 +40,6 @@ impl VexConfig {
             .unwrap_or(&self.default_agent_command);
         shell_split(cmd_str)
     }
-
 }
 
 /// Split a command string into program + args, respecting simple quoting.
