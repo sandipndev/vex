@@ -5,12 +5,21 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_AGENT_COMMAND: &str = "claude --dangerously-skip-permissions";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VexConfig {
     #[serde(default = "default_agent_command")]
     pub default_agent_command: String,
     #[serde(default)]
     pub repos: HashMap<String, RepoConfig>,
+}
+
+impl Default for VexConfig {
+    fn default() -> Self {
+        Self {
+            default_agent_command: default_agent_command(),
+            repos: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
