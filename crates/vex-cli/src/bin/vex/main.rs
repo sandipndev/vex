@@ -157,7 +157,10 @@ enum AgentCommand {
         id: String,
         /// Prompt text to send
         text: String,
-        /// Show thinking blocks
+        /// Watch the conversation after sending the prompt
+        #[arg(short, long)]
+        watch: bool,
+        /// Show thinking blocks (requires --watch)
         #[arg(long)]
         show_thinking: bool,
     },
@@ -520,9 +523,10 @@ async fn main() -> Result<()> {
             AgentCommand::Prompt {
                 id,
                 text,
+                watch,
                 show_thinking,
             } => {
-                agent::agent_prompt(effective_port, &id, &text, show_thinking).await?;
+                agent::agent_prompt(effective_port, &id, &text, watch, show_thinking).await?;
             }
         },
         Command::Repo { command } => match command {

@@ -99,17 +99,13 @@ pub async fn agent_prompt(
     port: u16,
     session_id_prefix: &str,
     text: &str,
+    watch: bool,
     show_thinking: bool,
 ) -> Result<()> {
     let session_id = resolve_agent_session(port, session_id_prefix).await?;
 
-    // Use a single connection: send prompt, read ack, then stream conversation
-    // lines until the agent finishes its turn.
-    let stream = connect(port).await?;
-    let (mut reader, mut writer) = io::split(stream);
-
-    send_client_message(
-        &mut writer,
+    let resp = request(
+        port,
         &ClientMessage::AgentPrompt {
             session_id,
             text: text.to_string(),
@@ -117,42 +113,12 @@ pub async fn agent_prompt(
     )
     .await?;
 
-    // Read ack (AgentPromptSent) or error
-    match read_frame(&mut reader).await? {
-        Some(Frame::Control(data)) => {
-            let msg: ServerMessage = serde_json::from_slice(&data)?;
-            if let ServerMessage::Error { message } = msg {
-                bail!("{}", message);
-            }
-        }
-        Some(Frame::Data(_)) => bail!("unexpected data frame"),
-        None => bail!("server closed connection"),
+    if let ServerMessage::Error { message } = resp {
+        bail!("{}", message);
     }
 
-    // Read conversation lines until turn completes (AgentWatchEnd)
-    loop {
-        match read_frame(&mut reader).await? {
-            Some(Frame::Control(data)) => {
-                let msg: ServerMessage = serde_json::from_slice(&data)?;
-                match msg {
-                    ServerMessage::AgentConversationLine { line, .. } => {
-                        format_conversation_line(&line, show_thinking);
-                    }
-                    ServerMessage::AgentWatchEnd { .. } => {
-                        break;
-                    }
-                    ServerMessage::Error { message } => {
-                        bail!("{}", message);
-                    }
-                    _ => {}
-                }
-            }
-            Some(Frame::Data(_)) => {}
-            None => {
-                eprintln!("[server disconnected]");
-                break;
-            }
-        }
+    if watch {
+        agent_watch(port, &session_id.to_string(), show_thinking).await?;
     }
 
     Ok(())

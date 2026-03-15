@@ -371,8 +371,6 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                 .await?;
             } else {
                 send_server_message(writer, &ServerMessage::AgentPromptSent { session_id }).await?;
-                // Stream conversation lines until the agent finishes its turn
-                handle_agent_watch(session_id, agent_store, writer, true).await?;
             }
         }
         ClientMessage::RepoAdd { name, path } => {
