@@ -466,18 +466,29 @@ async fn handle_agent_watch<W: AsyncWrite + Unpin>(
         }
     };
 
-    // Open the JSONL file, replay last 50 lines, then tail
-    let file = match std::fs::File::open(&jsonl_path) {
-        Ok(f) => f,
-        Err(e) => {
-            send_server_message(
-                writer,
-                &ServerMessage::Error {
-                    message: format!("cannot open conversation file: {}", e),
-                },
-            )
-            .await?;
-            return Ok(());
+    // Wait for the JSONL file to appear — Claude Code doesn't create it until
+    // the first conversation starts, so after sending a prompt via PTY the file
+    // may not exist yet.
+    let file = {
+        let mut attempts = 0;
+        loop {
+            match std::fs::File::open(&jsonl_path) {
+                Ok(f) => break f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempts < 30 => {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    send_server_message(
+                        writer,
+                        &ServerMessage::Error {
+                            message: format!("cannot open conversation file: {}", e),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
         }
     };
 
