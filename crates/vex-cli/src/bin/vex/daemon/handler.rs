@@ -9,10 +9,13 @@ use vex_cli::proto::{
     ClientMessage, Frame, ServerMessage, read_frame, send_server_message, write_data,
 };
 
+use std::path::Path;
+
 use super::agent::AgentStore;
 use super::config::VexConfig;
 use super::repo::RepoStore;
 use super::session::SessionManager;
+use super::workstream::WorkstreamStore;
 
 struct AttachState {
     session_id: Uuid,
@@ -25,10 +28,18 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'stati
     manager: Arc<SessionManager>,
     agent_store: AgentStore,
     repo_store: RepoStore,
+    workstream_store: WorkstreamStore,
     config: Arc<VexConfig>,
 ) {
-    if let Err(e) =
-        handle_connection_inner(stream, &manager, &agent_store, &repo_store, &config).await
+    if let Err(e) = handle_connection_inner(
+        stream,
+        &manager,
+        &agent_store,
+        &repo_store,
+        &workstream_store,
+        &config,
+    )
+    .await
     {
         warn!("connection handler error: {}", e);
     }
@@ -39,6 +50,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
     manager: &SessionManager,
     agent_store: &AgentStore,
     repo_store: &RepoStore,
+    workstream_store: &WorkstreamStore,
     config: &VexConfig,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
@@ -73,6 +85,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
         manager,
         agent_store,
         repo_store,
+        workstream_store,
         config,
     )
     .await;
@@ -96,6 +109,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
     manager: &SessionManager,
     agent_store: &AgentStore,
     repo_store: &RepoStore,
+    workstream_store: &WorkstreamStore,
     config: &VexConfig,
 ) -> Result<()> {
     loop {
@@ -152,7 +166,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                                     }
                                 }
                                 other => {
-                                    handle_control_idle(other, manager, agent_store, repo_store, config, writer).await?;
+                                    handle_control_idle(other, manager, agent_store, repo_store, workstream_store, config, writer).await?;
                                 }
                             }
                         }
@@ -224,8 +238,16 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                             }
                         }
                     } else {
-                        handle_control_idle(msg, manager, agent_store, repo_store, config, writer)
-                            .await?;
+                        handle_control_idle(
+                            msg,
+                            manager,
+                            agent_store,
+                            repo_store,
+                            workstream_store,
+                            config,
+                            writer,
+                        )
+                        .await?;
                     }
                 }
                 Some(Ok(Frame::Data(_))) => {
@@ -254,6 +276,7 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
     manager: &SessionManager,
     agent_store: &AgentStore,
     repo_store: &RepoStore,
+    workstream_store: &WorkstreamStore,
     config: &VexConfig,
     writer: &mut W,
 ) -> Result<()> {
@@ -444,9 +467,9 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
             )
             .await?;
         }
-        ClientMessage::AgentSpawn { repo } => {
+        ClientMessage::AgentSpawn { repo, workstream } => {
             // Resolve repo → working directory
-            let working_dir = {
+            let repo_path = {
                 let store = repo_store.lock().await;
                 match store.get(&repo) {
                     Some(path) => path,
@@ -462,6 +485,30 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                     }
                 }
             };
+
+            // If workstream is specified, use the worktree path instead
+            let working_dir = if let Some(ref ws_name) = workstream {
+                let ws_store = workstream_store.lock().await;
+                match ws_store.get_worktree_path(&repo, ws_name) {
+                    Some(path) => path,
+                    None => {
+                        send_server_message(
+                            writer,
+                            &ServerMessage::Error {
+                                message: format!(
+                                    "workstream '{}' not found for repo '{}'",
+                                    ws_name, repo
+                                ),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                repo_path
+            };
+
             // Get agent command from config
             let command = config.agent_command_for(&repo);
             match manager
@@ -483,7 +530,109 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                 }
             }
         }
+        ClientMessage::WorkstreamCreate { repo, name } => {
+            let repo_path = {
+                let store = repo_store.lock().await;
+                match store.get(&repo) {
+                    Some(path) => path,
+                    None => {
+                        send_server_message(
+                            writer,
+                            &ServerMessage::Error {
+                                message: format!("repo '{}' not found", repo),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            };
+            let mut ws_store = workstream_store.lock().await;
+            match ws_store.create(&repo, &name, &repo_path) {
+                Ok(worktree_path) => {
+                    info!(
+                        "created workstream '{}' for repo '{}' at {}",
+                        name,
+                        repo,
+                        worktree_path.display()
+                    );
+                    // Run on_workstream_create hooks if configured
+                    if let Some(hook_def) = &config.hooks.on_workstream_create
+                        && let Err(e) =
+                            run_workstream_hooks(manager, &worktree_path, &hook_def.commands).await
+                    {
+                        warn!("hook error: {}", e);
+                    }
+                    send_server_message(
+                        writer,
+                        &ServerMessage::WorkstreamCreated {
+                            repo,
+                            name,
+                            worktree_path,
+                        },
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    send_server_message(
+                        writer,
+                        &ServerMessage::Error {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        ClientMessage::WorkstreamList { repo } => {
+            let ws_store = workstream_store.lock().await;
+            let workstreams = ws_store.list(repo.as_deref());
+            send_server_message(writer, &ServerMessage::Workstreams { workstreams }).await?;
+        }
+        ClientMessage::WorkstreamRemove { repo, name } => {
+            let mut ws_store = workstream_store.lock().await;
+            match ws_store.remove(&repo, &name) {
+                Ok(()) => {
+                    info!("removed workstream '{}' from repo '{}'", name, repo);
+                    send_server_message(writer, &ServerMessage::WorkstreamRemoved { repo, name })
+                        .await?;
+                }
+                Err(e) => {
+                    send_server_message(
+                        writer,
+                        &ServerMessage::Error {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
     }
+    Ok(())
+}
+
+async fn run_workstream_hooks(
+    manager: &SessionManager,
+    worktree_path: &Path,
+    commands: &[String],
+) -> Result<()> {
+    let session_id = manager
+        .create_session(None, 80, 24, Some(worktree_path.to_path_buf()))
+        .await?;
+
+    // Wait for shell to initialize
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    for cmd in commands {
+        let input = format!("{}\r", cmd);
+        manager.write_input(session_id, input.as_bytes()).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    // Wait for last command to finish, then kill
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let _ = manager.kill_session(session_id).await;
     Ok(())
 }
 

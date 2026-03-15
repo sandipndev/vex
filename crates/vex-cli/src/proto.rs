@@ -43,6 +43,18 @@ pub enum ClientMessage {
     },
     AgentSpawn {
         repo: String,
+        workstream: Option<String>,
+    },
+    WorkstreamCreate {
+        repo: String,
+        name: String,
+    },
+    WorkstreamList {
+        repo: Option<String>,
+    },
+    WorkstreamRemove {
+        repo: String,
+        name: String,
     },
     RepoAdd {
         name: String,
@@ -114,6 +126,18 @@ pub enum ServerMessage {
         git_remote: Option<String>,
         git_branch: Option<String>,
     },
+    WorkstreamCreated {
+        repo: String,
+        name: String,
+        worktree_path: PathBuf,
+    },
+    WorkstreamRemoved {
+        repo: String,
+        name: String,
+    },
+    Workstreams {
+        workstreams: Vec<WorkstreamInfo>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,6 +163,15 @@ pub struct AgentEntry {
 pub struct RepoEntry {
     pub name: String,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkstreamInfo {
+    pub repo: String,
+    pub name: String,
+    pub worktree_path: PathBuf,
+    pub branch: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug)]
@@ -247,7 +280,26 @@ mod tests {
                 session_id: Uuid::nil(),
                 text: "hello".into(),
             },
-            ClientMessage::AgentSpawn { repo: "vex".into() },
+            ClientMessage::AgentSpawn {
+                repo: "vex".into(),
+                workstream: None,
+            },
+            ClientMessage::AgentSpawn {
+                repo: "vex".into(),
+                workstream: Some("feature-x".into()),
+            },
+            ClientMessage::WorkstreamCreate {
+                repo: "vex".into(),
+                name: "feature-x".into(),
+            },
+            ClientMessage::WorkstreamList { repo: None },
+            ClientMessage::WorkstreamList {
+                repo: Some("vex".into()),
+            },
+            ClientMessage::WorkstreamRemove {
+                repo: "vex".into(),
+                name: "feature-x".into(),
+            },
             ClientMessage::RepoAdd {
                 name: "vex".into(),
                 path: PathBuf::from("/tmp/vex"),
@@ -331,6 +383,24 @@ mod tests {
                 path: PathBuf::from("/tmp/vex"),
                 git_remote: Some("git@github.com:user/vex.git".into()),
                 git_branch: Some("main".into()),
+            },
+            ServerMessage::WorkstreamCreated {
+                repo: "vex".into(),
+                name: "feature-x".into(),
+                worktree_path: PathBuf::from("/tmp/workstreams/vex/feature-x"),
+            },
+            ServerMessage::WorkstreamRemoved {
+                repo: "vex".into(),
+                name: "feature-x".into(),
+            },
+            ServerMessage::Workstreams {
+                workstreams: vec![WorkstreamInfo {
+                    repo: "vex".into(),
+                    name: "feature-x".into(),
+                    worktree_path: PathBuf::from("/tmp/workstreams/vex/feature-x"),
+                    branch: "feature-x".into(),
+                    created_at: Utc::now(),
+                }],
             },
         ];
         for msg in msgs {

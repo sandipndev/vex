@@ -95,11 +95,12 @@ pub async fn agent_watch(port: u16, session_id_prefix: &str, show_thinking: bool
     Ok(())
 }
 
-pub async fn agent_spawn(port: u16, repo: &str) -> Result<String> {
+pub async fn agent_spawn(port: u16, repo: &str, workstream: Option<&str>) -> Result<String> {
     let resp = request(
         port,
         &ClientMessage::AgentSpawn {
             repo: repo.to_string(),
+            workstream: workstream.map(String::from),
         },
     )
     .await?;
