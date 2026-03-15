@@ -333,8 +333,9 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
             handle_agent_watch(session_id, agent_store, writer).await?;
         }
         ClientMessage::AgentPrompt { session_id, text } => {
-            // Write the prompt text + newline to the vex session's PTY
-            let input = format!("{}\n", text);
+            // Write the prompt text + carriage return to the vex session's PTY
+            // PTYs in raw mode expect \r, not \n, to submit input
+            let input = format!("{}\r", text);
             if let Err(e) = manager.write_input(session_id, input.as_bytes()).await {
                 send_server_message(
                     writer,
