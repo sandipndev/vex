@@ -148,7 +148,16 @@ async fn detect_agents(manager: &SessionManager, store: &AgentStore) -> anyhow::
 }
 
 /// Walk /proc/{pid}/stat parent chain upward to find a matching vex shell PID.
+/// Also checks if pid itself matches, for agent spawn sessions where the
+/// Claude process IS the session command (no intermediate shell).
 fn find_ancestor_match(pid: u32, shell_pids: &HashMap<Uuid, u32>) -> Option<Uuid> {
+    // Check if pid itself is a vex session command (agent spawn case)
+    for (session_id, &shell_pid) in shell_pids {
+        if pid == shell_pid {
+            return Some(*session_id);
+        }
+    }
+
     let mut current = pid;
     // Limit walk depth to avoid infinite loops
     for _ in 0..64 {
