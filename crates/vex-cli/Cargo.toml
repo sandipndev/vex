@@ -25,6 +25,7 @@ nix = { version = "0.31", features = ["term", "signal", "process"] }
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 terminal_size = "0.4"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

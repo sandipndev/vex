@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,10 @@ pub enum ClientMessage {
     DetachSession,
     ResizeSession { id: Uuid, cols: u16, rows: u16 },
     KillSession { id: Uuid },
+    AgentList,
+    AgentNotifications,
+    AgentWatch { session_id: Uuid },
+    AgentPrompt { session_id: Uuid, text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,6 +36,9 @@ pub enum ServerMessage {
     ClientJoined { session_id: Uuid, client_id: Uuid },
     ClientLeft { session_id: Uuid, client_id: Uuid },
     Error { message: String },
+    AgentListResponse { agents: Vec<AgentEntry> },
+    AgentConversationLine { session_id: Uuid, line: String },
+    AgentWatchEnd { session_id: Uuid },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +48,16 @@ pub struct SessionInfo {
     pub rows: u16,
     pub created_at: DateTime<Utc>,
     pub client_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentEntry {
+    pub vex_session_id: Uuid,
+    pub claude_session_id: String,
+    pub claude_pid: u32,
+    pub cwd: PathBuf,
+    pub detected_at: DateTime<Utc>,
+    pub needs_intervention: bool,
 }
 
 #[derive(Debug)]
@@ -137,6 +156,15 @@ mod tests {
                 rows: 24,
             },
             ClientMessage::KillSession { id: Uuid::nil() },
+            ClientMessage::AgentList,
+            ClientMessage::AgentNotifications,
+            ClientMessage::AgentWatch {
+                session_id: Uuid::nil(),
+            },
+            ClientMessage::AgentPrompt {
+                session_id: Uuid::nil(),
+                text: "hello".into(),
+            },
         ];
         for msg in msgs {
             let json = serde_json::to_string(&msg).unwrap();
@@ -174,6 +202,23 @@ mod tests {
             },
             ServerMessage::Error {
                 message: "fail".into(),
+            },
+            ServerMessage::AgentListResponse {
+                agents: vec![AgentEntry {
+                    vex_session_id: Uuid::nil(),
+                    claude_session_id: "abc123".into(),
+                    claude_pid: 1234,
+                    cwd: PathBuf::from("/tmp"),
+                    detected_at: Utc::now(),
+                    needs_intervention: true,
+                }],
+            },
+            ServerMessage::AgentConversationLine {
+                session_id: Uuid::nil(),
+                line: "test line".into(),
+            },
+            ServerMessage::AgentWatchEnd {
+                session_id: Uuid::nil(),
             },
         ];
         for msg in msgs {

@@ -9,6 +9,7 @@ use vex_cli::proto::{
     ClientMessage, Frame, ServerMessage, read_frame, send_server_message, write_data,
 };
 
+use super::agent::AgentStore;
 use super::session::SessionManager;
 
 struct AttachState {
@@ -20,8 +21,9 @@ struct AttachState {
 pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     manager: Arc<SessionManager>,
+    agent_store: AgentStore,
 ) {
-    if let Err(e) = handle_connection_inner(stream, &manager).await {
+    if let Err(e) = handle_connection_inner(stream, &manager, &agent_store).await {
         warn!("connection handler error: {}", e);
     }
 }
@@ -29,6 +31,7 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'stati
 async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     manager: &SessionManager,
+    agent_store: &AgentStore,
 ) -> Result<()> {
     let client_id = Uuid::new_v4();
     let (reader, mut writer) = tokio::io::split(stream);
@@ -60,6 +63,7 @@ async fn handle_connection_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'sta
         &mut writer,
         &mut attached,
         manager,
+        agent_store,
     )
     .await;
 
@@ -79,6 +83,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
     writer: &mut W,
     attached: &mut Option<AttachState>,
     manager: &SessionManager,
+    agent_store: &AgentStore,
 ) -> Result<()> {
     loop {
         if let Some(state) = attached {
@@ -126,6 +131,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                                             message: format!("kill error: {}", e),
                                         }).await?;
                                     } else {
+                                        agent_store.lock().await.remove(&id);
                                         send_server_message(writer, &ServerMessage::SessionEnded {
                                             id,
                                             exit_code: None,
@@ -133,7 +139,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                                     }
                                 }
                                 other => {
-                                    handle_control_idle(other, manager, writer).await?;
+                                    handle_control_idle(other, manager, agent_store, writer).await?;
                                 }
                             }
                         }
@@ -205,7 +211,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
                             }
                         }
                     } else {
-                        handle_control_idle(msg, manager, writer).await?;
+                        handle_control_idle(msg, manager, agent_store, writer).await?;
                     }
                 }
                 Some(Ok(Frame::Data(_))) => {
@@ -232,6 +238,7 @@ async fn connection_loop<W: AsyncWrite + Unpin>(
 async fn handle_control_idle<W: AsyncWrite + Unpin>(
     msg: ClientMessage,
     manager: &SessionManager,
+    agent_store: &AgentStore,
     writer: &mut W,
 ) -> Result<()> {
     match msg {
@@ -276,6 +283,8 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
                 )
                 .await?;
             } else {
+                // Immediately remove any agent linked to this session
+                agent_store.lock().await.remove(&id);
                 send_server_message(
                     writer,
                     &ServerMessage::SessionEnded {
@@ -298,6 +307,161 @@ async fn handle_control_idle<W: AsyncWrite + Unpin>(
         ClientMessage::AttachSession { .. } => {
             // Handled in the main loop
         }
+        ClientMessage::AgentList => {
+            let agents = agent_store.lock().await;
+            let entries = agents.values().map(|a| a.to_entry()).collect();
+            send_server_message(writer, &ServerMessage::AgentListResponse { agents: entries })
+                .await?;
+        }
+        ClientMessage::AgentNotifications => {
+            let agents = agent_store.lock().await;
+            let entries = agents
+                .values()
+                .filter(|a| a.needs_intervention)
+                .map(|a| a.to_entry())
+                .collect();
+            send_server_message(writer, &ServerMessage::AgentListResponse { agents: entries })
+                .await?;
+        }
+        ClientMessage::AgentWatch { session_id } => {
+            handle_agent_watch(session_id, agent_store, writer).await?;
+        }
+        ClientMessage::AgentPrompt { session_id, text } => {
+            // Write the prompt text + newline to the vex session's PTY
+            let input = format!("{}\n", text);
+            if let Err(e) = manager.write_input(session_id, input.as_bytes()).await {
+                send_server_message(
+                    writer,
+                    &ServerMessage::Error {
+                        message: format!("agent prompt error: {}", e),
+                    },
+                )
+                .await?;
+            }
+        }
     }
     Ok(())
+}
+
+async fn handle_agent_watch<W: AsyncWrite + Unpin>(
+    session_id: Uuid,
+    agent_store: &AgentStore,
+    writer: &mut W,
+) -> Result<()> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    let jsonl_path = {
+        let agents = agent_store.lock().await;
+        match agents.get(&session_id) {
+            Some(info) => info.jsonl_path.clone(),
+            None => {
+                send_server_message(
+                    writer,
+                    &ServerMessage::Error {
+                        message: format!("no agent found for session {}", session_id),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    };
+
+    // Open the JSONL file, replay last 50 lines, then tail
+    let file = match std::fs::File::open(&jsonl_path) {
+        Ok(f) => f,
+        Err(e) => {
+            send_server_message(
+                writer,
+                &ServerMessage::Error {
+                    message: format!("cannot open conversation file: {}", e),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+
+    // Read all existing lines to replay the last 50
+    let mut lines: Vec<String> = Vec::new();
+    let mut line_buf = String::new();
+    while reader.read_line(&mut line_buf)? > 0 {
+        let trimmed = line_buf.trim_end().to_string();
+        if !trimmed.is_empty() {
+            lines.push(trimmed);
+        }
+        line_buf.clear();
+    }
+
+    let replay_start = lines.len().saturating_sub(50);
+    for line in &lines[replay_start..] {
+        send_server_message(
+            writer,
+            &ServerMessage::AgentConversationLine {
+                session_id,
+                line: line.clone(),
+            },
+        )
+        .await?;
+    }
+
+    // Now tail the file using inotify
+    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(64);
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res
+            && matches!(event.kind, EventKind::Modify(_))
+        {
+            let _ = notify_tx.blocking_send(());
+        }
+    })?;
+
+    watcher.watch(jsonl_path.as_ref(), RecursiveMode::NonRecursive)?;
+
+    // Current file position is at end from reading lines
+    let mut pos = reader.stream_position()?;
+
+    loop {
+        // Check if agent is still alive
+        {
+            let agents = agent_store.lock().await;
+            if !agents.contains_key(&session_id) {
+                send_server_message(
+                    writer,
+                    &ServerMessage::AgentWatchEnd { session_id },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+
+        // Wait for file modification with a timeout for periodic liveness checks
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            notify_rx.recv(),
+        )
+        .await;
+
+        // Read new lines
+        reader.seek(SeekFrom::Start(pos))?;
+        line_buf.clear();
+        while reader.read_line(&mut line_buf)? > 0 {
+            let trimmed = line_buf.trim_end().to_string();
+            if !trimmed.is_empty() {
+                send_server_message(
+                    writer,
+                    &ServerMessage::AgentConversationLine {
+                        session_id,
+                        line: trimmed,
+                    },
+                )
+                .await?;
+            }
+            line_buf.clear();
+        }
+        pos = reader.stream_position()?;
+    }
 }
