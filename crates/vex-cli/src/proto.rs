@@ -13,7 +13,10 @@ const MAX_FRAME_SIZE: usize = 1_048_576; // 1 MiB
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
-    CreateSession { shell: Option<String> },
+    CreateSession {
+        shell: Option<String>,
+        repo: Option<String>,
+    },
     ListSessions,
     AttachSession { id: Uuid, cols: u16, rows: u16 },
     DetachSession,
@@ -23,6 +26,10 @@ pub enum ClientMessage {
     AgentNotifications,
     AgentWatch { session_id: Uuid },
     AgentPrompt { session_id: Uuid, text: String },
+    RepoAdd { name: String, path: PathBuf },
+    RepoRemove { name: String },
+    RepoList,
+    RepoIntrospectPath { path: PathBuf },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +47,15 @@ pub enum ServerMessage {
     AgentPromptSent { session_id: Uuid },
     AgentConversationLine { session_id: Uuid, line: String },
     AgentWatchEnd { session_id: Uuid },
+    RepoAdded { name: String, path: PathBuf },
+    RepoRemoved { name: String },
+    Repos { repos: Vec<RepoEntry> },
+    RepoIntrospected {
+        suggested_name: String,
+        path: PathBuf,
+        git_remote: Option<String>,
+        git_branch: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +75,12 @@ pub struct AgentEntry {
     pub cwd: PathBuf,
     pub detected_at: DateTime<Utc>,
     pub needs_intervention: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepoEntry {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -143,6 +165,7 @@ mod tests {
         let msgs = vec![
             ClientMessage::CreateSession {
                 shell: Some("bash".into()),
+                repo: None,
             },
             ClientMessage::ListSessions,
             ClientMessage::AttachSession {
@@ -165,6 +188,17 @@ mod tests {
             ClientMessage::AgentPrompt {
                 session_id: Uuid::nil(),
                 text: "hello".into(),
+            },
+            ClientMessage::RepoAdd {
+                name: "vex".into(),
+                path: PathBuf::from("/tmp/vex"),
+            },
+            ClientMessage::RepoRemove {
+                name: "vex".into(),
+            },
+            ClientMessage::RepoList,
+            ClientMessage::RepoIntrospectPath {
+                path: PathBuf::from("/tmp"),
             },
         ];
         for msg in msgs {
@@ -223,6 +257,25 @@ mod tests {
             },
             ServerMessage::AgentWatchEnd {
                 session_id: Uuid::nil(),
+            },
+            ServerMessage::RepoAdded {
+                name: "vex".into(),
+                path: PathBuf::from("/tmp/vex"),
+            },
+            ServerMessage::RepoRemoved {
+                name: "vex".into(),
+            },
+            ServerMessage::Repos {
+                repos: vec![RepoEntry {
+                    name: "vex".into(),
+                    path: PathBuf::from("/tmp/vex"),
+                }],
+            },
+            ServerMessage::RepoIntrospected {
+                suggested_name: "vex".into(),
+                path: PathBuf::from("/tmp/vex"),
+                git_remote: Some("git@github.com:user/vex.git".into()),
+                git_branch: Some("main".into()),
             },
         ];
         for msg in msgs {
@@ -302,6 +355,7 @@ mod tests {
         let (mut client, mut server) = tokio::io::duplex(4096);
         let msg = ClientMessage::CreateSession {
             shell: Some("zsh".into()),
+            repo: None,
         };
         send_client_message(&mut client, &msg).await.unwrap();
         drop(client);

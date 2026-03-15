@@ -42,6 +42,7 @@ impl SessionManager {
         shell: Option<String>,
         cols: u16,
         rows: u16,
+        working_dir: Option<std::path::PathBuf>,
     ) -> Result<Uuid> {
         let shell = shell
             .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
@@ -50,7 +51,10 @@ impl SessionManager {
         pty.resize(Size::new(rows, cols))
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let cmd = pty_process::Command::new(&shell);
+        let mut cmd = pty_process::Command::new(&shell);
+        if let Some(dir) = working_dir {
+            cmd = cmd.current_dir(dir);
+        }
         let child = cmd.spawn(pts).map_err(|e| anyhow::anyhow!("{}", e))?;
         let shell_pid = child
             .id()
