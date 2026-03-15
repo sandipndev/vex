@@ -1,3 +1,4 @@
+mod agent;
 mod handler;
 mod session;
 
@@ -8,6 +9,7 @@ use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+use agent::{new_agent_store, spawn_detection_task};
 use session::SessionManager;
 
 pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
@@ -15,6 +17,10 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
     info!("daemon listening on 127.0.0.1:{}", port);
 
     let manager = Arc::new(SessionManager::new());
+    let agent_store = new_agent_store();
+
+    // Start agent detection background task
+    spawn_detection_task(Arc::clone(&manager), Arc::clone(&agent_store));
 
     // Signal handler for graceful shutdown
     let manager_signal = Arc::clone(&manager);
@@ -46,8 +52,9 @@ pub async fn run(port: u16, vex_dir: &Path) -> Result<()> {
             Ok((stream, addr)) => {
                 info!("new connection from {}", addr);
                 let manager = Arc::clone(&manager);
+                let agent_store = Arc::clone(&agent_store);
                 tokio::spawn(async move {
-                    handler::handle_connection(stream, manager).await;
+                    handler::handle_connection(stream, manager, agent_store).await;
                 });
             }
             Err(e) => {

@@ -13,6 +13,7 @@ const MAX_SCROLLBACK: usize = 64 * 1024;
 
 pub struct SessionHandle {
     pub id: Uuid,
+    pub shell_pid: u32,
     pub cols: u16,
     pub rows: u16,
     pub created_at: chrono::DateTime<Utc>,
@@ -51,6 +52,9 @@ impl SessionManager {
 
         let cmd = pty_process::Command::new(&shell);
         let child = cmd.spawn(pts).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let shell_pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("child exited before PID captured"))?;
 
         let (read_pty, write_pty) = pty.into_split();
         let (output_tx, _) = broadcast::channel(256);
@@ -60,6 +64,7 @@ impl SessionManager {
         let id = Uuid::new_v4();
         let handle = SessionHandle {
             id,
+            shell_pid,
             cols,
             rows,
             created_at: Utc::now(),
@@ -249,6 +254,12 @@ impl SessionManager {
         use tokio::io::AsyncWriteExt;
         let _ = writer.shutdown().await;
         Ok(())
+    }
+
+    /// Returns a map of vex session ID → shell PID for agent detection.
+    pub async fn shell_pids(&self) -> HashMap<Uuid, u32> {
+        let sessions = self.sessions.lock().await;
+        sessions.iter().map(|(id, h)| (*id, h.shell_pid)).collect()
     }
 
     pub async fn kill_all(&self) {

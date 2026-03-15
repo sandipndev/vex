@@ -1,3 +1,5 @@
+mod agent;
+mod client;
 mod daemon;
 mod session;
 
@@ -66,6 +68,12 @@ enum Command {
         #[command(subcommand)]
         command: RemoteCommand,
     },
+    /// Manage Claude Code agents
+    #[command(alias = "a")]
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -116,6 +124,34 @@ enum DaemonCommand {
     /// Run the daemon (internal)
     #[command(hide = true)]
     Run,
+}
+
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// List detected Claude Code agents
+    #[command(alias = "ls")]
+    List,
+    /// Show agents that need human intervention
+    #[command(alias = "notif")]
+    Notifications,
+    /// Watch a Claude Code agent's conversation
+    Watch {
+        /// Vex session ID or unique prefix
+        id: String,
+        /// Show thinking blocks
+        #[arg(long)]
+        show_thinking: bool,
+    },
+    /// Send a prompt to a Claude Code agent
+    Prompt {
+        /// Vex session ID or unique prefix
+        id: String,
+        /// Prompt text to send
+        text: String,
+        /// Show thinking blocks
+        #[arg(long)]
+        show_thinking: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -430,6 +466,24 @@ async fn main() -> Result<()> {
             }
             SessionCommand::Attach { id } => {
                 session::session_attach(effective_port, &id).await?;
+            }
+        },
+        Command::Agent { command } => match command {
+            AgentCommand::List => {
+                agent::agent_list(effective_port).await?;
+            }
+            AgentCommand::Notifications => {
+                agent::agent_notifications(effective_port).await?;
+            }
+            AgentCommand::Watch { id, show_thinking } => {
+                agent::agent_watch(effective_port, &id, show_thinking).await?;
+            }
+            AgentCommand::Prompt {
+                id,
+                text,
+                show_thinking,
+            } => {
+                agent::agent_prompt(effective_port, &id, &text, show_thinking).await?;
             }
         },
         _ => unreachable!(),
