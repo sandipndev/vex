@@ -40,7 +40,7 @@ fn load_saved_connection(vex_dir: &Path) -> Option<SavedConnection> {
 }
 
 #[derive(Parser)]
-#[command(name = "vex", about = "Vex terminal multiplexer", version)]
+#[command(name = "vex", about = concat!("Vex terminal multiplexer v", env!("CARGO_PKG_VERSION")), version)]
 struct Cli {
     /// Daemon port
     #[arg(long, env = "VEX_PORT", default_value_t = DEFAULT_PORT)]
